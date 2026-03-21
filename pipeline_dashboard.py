@@ -317,7 +317,8 @@ def export_pipeline_excel(file):
             fd_ws.write(4+r_s,0,"",F["alt"] if alt else F["text"]); fd_ws.write(4+r_s,1,row["DU"],F["alt"] if alt else F["text"]); fd_ws.write(4+r_s,2,row["Closure Due Quarter"],F["alt"] if alt else F["text"])
             fd_ws.write_number(4+r_s,3,row["Count"],F["alt_num"] if alt else F["num"]); fd_ws.write_number(4+r_s,4,row["Gross"],F["alt_num"] if alt else F["num"]); fd_ws.write_number(4+r_s,5,row["Net"],F["alt_num"] if alt else F["num"]); r_s+=1
         ts=4+r_s
-        fd_ws.write(ts,0,"GRAND TOTAL",F["tot_lbl"]); [fd_ws.write(ts,c,"",F["tot_lbl"]) for c in range(1,3)]
+        fd_ws.write(ts,0,"GRAND TOTAL",F["tot_lbl"])
+        for _c in range(1,3): fd_ws.write(ts,_c,"",F["tot_lbl"])
         fd_ws.write_number(ts,3,fore_du_summary["Count"].sum(),F["tot_num"]); fd_ws.write_number(ts,4,fore_du_summary["Gross"].sum(),F["tot_num"]); fd_ws.write_number(ts,5,fore_du_summary["Net"].sum(),F["tot_num"])
         det_start=ts+2
         fd_ws.merge_range(det_start,0,det_start,9,"Detail: Forecasted Deals by BU / DU",F["sec_hdr"]); fd_ws.set_row(det_start,22)
@@ -326,13 +327,15 @@ def export_pipeline_excel(file):
         for _, row in fore_du_detail.iterrows():
             if row["BU"]!=current_bu:
                 current_bu=row["BU"]; bu_grp=fore_du_detail[fore_du_detail["BU"]==current_bu]
-                fd_ws.write(det_start+2+r_d,0,current_bu,F["bu_lbl"]); [fd_ws.write(det_start+2+r_d,cc,"",F["bu_lbl"]) for cc in range(1,10)]
+                fd_ws.write(det_start+2+r_d,0,current_bu,F["bu_lbl"])
+                for _cc in range(1,10): fd_ws.write(det_start+2+r_d,_cc,"",F["bu_lbl"])
                 fd_ws.write_number(det_start+2+r_d,7,bu_grp["Gross"].sum(),F["bu_num"]); fd_ws.write_number(det_start+2+r_d,8,bu_grp["Net"].sum(),F["bu_num"]); r_d+=1
             alt=r_d%2==1; f_t=F["grn"] if not alt else F["alt"]; f_n=F["grn_num"] if not alt else F["alt_num"]
             fd_ws.write(det_start+2+r_d,0,"",f_t); fd_ws.write(det_start+2+r_d,1,str(row["DU"]) if pd.notna(row["DU"]) else "",f_t); fd_ws.write(det_start+2+r_d,2,str(row["Account Name"]) if pd.notna(row["Account Name"]) else "",f_t); fd_ws.write(det_start+2+r_d,3,str(row["Lead/Opp Name"]) if pd.notna(row["Lead/Opp Name"]) else "",f_t); fd_ws.write(det_start+2+r_d,4,str(row["Stage"]) if pd.notna(row["Stage"]) else "",f_t); fd_ws.write(det_start+2+r_d,5,str(row["Account Manager"]) if pd.notna(row["Account Manager"]) else "",f_t); fd_ws.write(det_start+2+r_d,6,str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "",f_t)
             fd_ws.write_number(det_start+2+r_d,7,row["Gross"],f_n); fd_ws.write_number(det_start+2+r_d,8,row["Net"],f_n); fd_ws.write(det_start+2+r_d,9,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",f_t); r_d+=1
         td=det_start+2+r_d
-        fd_ws.write(td,0,"GRAND TOTAL",F["tot_lbl"]); [fd_ws.write(td,c,"",F["tot_lbl"]) for c in range(1,7)]
+        fd_ws.write(td,0,"GRAND TOTAL",F["tot_lbl"])
+        for _c in range(1,7): fd_ws.write(td,_c,"",F["tot_lbl"])
         fd_ws.write_number(td,7,fore_du_detail["Gross"].sum(),F["tot_num"]); fd_ws.write_number(td,8,fore_du_detail["Net"].sum(),F["tot_num"]); fd_ws.write(td,9,"",F["tot_lbl"])
 
         # SHEET 4 — SECTOR & AM

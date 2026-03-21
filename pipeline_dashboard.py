@@ -47,8 +47,7 @@ STAGE_COLORS = {
     "S5 - Negotiation":   "#228B22",
 }
 
-DEFAULT_FILE = r"C:\Users\khali\Downloads\data (2).xlsx"
-COA_FILE     = r"C:\Users\khali\Downloads\Charter of Accounts 1 (1)1.xlsx"
+COA_FILE = "charter_of_accounts.xlsx"
 
 # ── HELPERS ────────────────────────────────────────────────────────────────────
 def fmt_m(val):
@@ -120,18 +119,13 @@ def build_du_breakdown(file):
 st.sidebar.title("📁 Load Data")
 uploaded = st.sidebar.file_uploader("Upload weekly Excel report", type=["xlsx", "xls"])
 
-if uploaded:
-    df_raw = load_data(uploaded)
-    du_exp = build_du_breakdown(uploaded)
-    st.sidebar.success("File loaded ✓")
-else:
-    try:
-        df_raw = load_data(DEFAULT_FILE)
-        du_exp = build_du_breakdown(DEFAULT_FILE)
-        st.sidebar.info("Using default file from Downloads")
-    except Exception:
-        st.info("👆 Upload your weekly pipeline Excel file to get started.")
-        st.stop()
+if not uploaded:
+    st.info("👆 Upload your weekly pipeline Excel file to get started.")
+    st.stop()
+
+df_raw = load_data(uploaded)
+du_exp = build_du_breakdown(uploaded)
+st.sidebar.success("File loaded ✓")
 
 # ── FILTERS ───────────────────────────────────────────────────────────────────
 st.sidebar.markdown("---")

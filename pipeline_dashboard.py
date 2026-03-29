@@ -422,6 +422,27 @@ def export_pipeline_excel(file):
                 pw.write_blank(2+i,14,None,fd_)
             pw.write(2+i,15,str(row["Source of Opportunity"]) if pd.notna(row["Source of Opportunity"]) else "",ft); pw.write(2+i,16,"YES" if is_ov else "",ft)
 
+        # SHEET 9 — PIPELINE BREAKDOWN
+        bw = wb.add_worksheet("Pipeline Breakdown"); bw.set_zoom(85); bw.set_tab_color("#9370DB")
+        writer.sheets["Pipeline Breakdown"] = bw
+        bw.merge_range("A1:L1","Pipeline Breakdown — One Row per BU / DU per Opportunity",F["title"]); bw.set_row(0,28); bw.freeze_panes(2,0)
+        _hdr(bw,1,["Account Name","Opportunity","BU","DU","Gross (QAR)","Net (QAR)","Stage","Account Manager","Sector","Quarter","Win Prob","Forecasted"],[28,36,30,36,18,18,22,22,16,10,12,12],F["header"])
+        bd_df = du_exp.sort_values(["BU","DU","Account Name"]).reset_index(drop=True)
+        bw.autofilter(1,0,1+len(bd_df),11)
+        for i, row in bd_df.iterrows():
+            alt=i%2==1; ft=F["alt"] if alt else F["text"]; fn=F["alt_num"] if alt else F["num"]
+            bw.write(2+i,0,str(row["Account Name"]) if pd.notna(row["Account Name"]) else "",ft)
+            bw.write(2+i,1,str(row["Lead/Opp Name"]) if pd.notna(row["Lead/Opp Name"]) else "",ft)
+            bw.write(2+i,2,str(row["BU"]) if pd.notna(row["BU"]) else "",ft)
+            bw.write(2+i,3,str(row["DU"]) if pd.notna(row["DU"]) else "",ft)
+            bw.write_number(2+i,4,row["Gross"],fn); bw.write_number(2+i,5,row["Net"],fn)
+            bw.write(2+i,6,str(row["Stage"]) if pd.notna(row["Stage"]) else "",ft)
+            bw.write(2+i,7,str(row["Account Manager"]) if pd.notna(row["Account Manager"]) else "",ft)
+            bw.write(2+i,8,str(row["Sector"]) if pd.notna(row["Sector"]) else "",ft)
+            bw.write(2+i,9,str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "",ft)
+            bw.write(2+i,10,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",ft)
+            bw.write(2+i,11,str(row["Forecasted"]) if pd.notna(row["Forecasted"]) else "",ft)
+
     output.seek(0)
     return output.read()
 

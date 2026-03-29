@@ -198,6 +198,8 @@ def _xl_formats(wb):
         "y25_num":  wb.add_format({"bg_color":"#DAE8FC","num_format":"#,##0","border":1,"align":"right"}),
         "y26":      wb.add_format({"bg_color":"#D5E8D4","border":1,"align":"left"}),
         "y26_num":  wb.add_format({"bg_color":"#D5E8D4","num_format":"#,##0","border":1,"align":"right"}),
+        "opp":      wb.add_format({"italic":True,"bg_color":"#FAFAFA","border":1,"align":"left","indent":2}),
+        "opp_num":  wb.add_format({"italic":True,"bg_color":"#FAFAFA","num_format":"#,##0","border":1,"align":"right"}),
     }
 
 def _hdr(ws, row, cols, widths, fmt):
@@ -282,7 +284,7 @@ def export_pipeline_excel(file):
         du_ws = wb.add_worksheet("DU Breakdown"); du_ws.set_zoom(90); du_ws.set_tab_color("#FF8C00")
         writer.sheets["DU Breakdown"] = du_ws
         du_ws.merge_range("A1:G1","Gross & Net Breakdown by BU / Delivery Unit",F["title"]); du_ws.set_row(0,28)
-        _hdr(du_ws,1,["BU","Delivery Unit","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"],[42,38,20,20,22],F["header"])
+        _hdr(du_ws,1,["BU","Delivery Unit / Opportunity","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"],[42,52,20,20,22],F["header"])
         r_out=0
         for bu_name, bu_grp in du_totals.groupby("BU"):
             du_ws.write(2+r_out,0,bu_name,F["bu_lbl"]); du_ws.write(2+r_out,1,"",F["bu_lbl"])
@@ -291,6 +293,10 @@ def export_pipeline_excel(file):
                 alt=r_out%2==1
                 du_ws.write(2+r_out,0,"",F["alt"] if alt else F["text"]); du_ws.write(2+r_out,1,row["DU"],F["alt"] if alt else F["text"])
                 du_ws.write_number(2+r_out,2,row["Gross"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,3,row["Net"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,4,row["Forecasted Net"],F["alt_num"] if alt else F["num"]); r_out+=1
+                for _, deal in du_exp[du_exp["DU"]==row["DU"]].iterrows():
+                    fore_net=deal["Net"] if str(deal.get("Forecasted","")).strip()=="Yes" else 0
+                    du_ws.write(2+r_out,0,"",F["opp"]); du_ws.write(2+r_out,1,f"  ↳  {deal['Lead/Opp Name']}",F["opp"])
+                    du_ws.write_number(2+r_out,2,deal["Gross"],F["opp_num"]); du_ws.write_number(2+r_out,3,deal["Net"],F["opp_num"]); du_ws.write_number(2+r_out,4,fore_net,F["opp_num"]); r_out+=1
         t=2+r_out
         du_ws.write(t,0,"GRAND TOTAL",F["tot_lbl"]); du_ws.write(t,1,"",F["tot_lbl"])
         du_ws.write_number(t,2,du_totals["Gross"].sum(),F["tot_num"]); du_ws.write_number(t,3,du_totals["Net"].sum(),F["tot_num"]); du_ws.write_number(t,4,du_totals["Forecasted Net"].sum(),F["tot_num"])
@@ -509,7 +515,7 @@ def export_awarded_excel(file26, file25):
         du_ws = wb.add_worksheet("DU Breakdown"); du_ws.set_zoom(90); du_ws.set_tab_color("#FF8C00")
         writer.sheets["DU Breakdown"] = du_ws
         du_ws.merge_range("A1:F1","Gross & Net Breakdown by BU / Delivery Unit",F["title"]); du_ws.set_row(0,28)
-        for c,(col,w) in enumerate(zip(["BU","Delivery Unit","Gross (QAR)","Net (QAR)","Net 2025 (QAR)","Net 2026 (QAR)"],[42,38,20,20,20,20])):
+        for c,(col,w) in enumerate(zip(["BU","Delivery Unit / Opportunity","Gross (QAR)","Net (QAR)","Net 2025 (QAR)","Net 2026 (QAR)"],[42,52,20,20,20,20])):
             du_ws.write(1,c,col,F["header"]); du_ws.set_column(c,c,w)
         r_out=0
         for bu_name, bu_grp in du_totals.groupby("BU"):
@@ -519,6 +525,10 @@ def export_awarded_excel(file26, file25):
                 alt=r_out%2==1
                 du_ws.write(2+r_out,0,"",F["alt"] if alt else F["text"]); du_ws.write(2+r_out,1,row["DU"],F["alt"] if alt else F["text"])
                 du_ws.write_number(2+r_out,2,row["Gross"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,3,row["Net"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,4,row["2025"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,5,row["2026"],F["alt_num"] if alt else F["num"]); r_out+=1
+                for _, deal in du_exp[du_exp["DU"]==row["DU"]].iterrows():
+                    n25=deal["Net"] if deal["Year"]=="2025" else 0; n26=deal["Net"] if deal["Year"]=="2026" else 0
+                    du_ws.write(2+r_out,0,"",F["opp"]); du_ws.write(2+r_out,1,f"  ↳  {deal['Opportunity']}",F["opp"])
+                    du_ws.write_number(2+r_out,2,deal["Gross"],F["opp_num"]); du_ws.write_number(2+r_out,3,deal["Net"],F["opp_num"]); du_ws.write_number(2+r_out,4,n25,F["opp_num"]); du_ws.write_number(2+r_out,5,n26,F["opp_num"]); r_out+=1
         t=2+r_out
         du_ws.write(t,0,"GRAND TOTAL",F["tot_lbl"]); du_ws.write(t,1,"",F["tot_lbl"])
         du_ws.write_number(t,2,du_totals["Gross"].sum(),F["tot_num"]); du_ws.write_number(t,3,du_totals["Net"].sum(),F["tot_num"]); du_ws.write_number(t,4,du_totals["2025"].sum(),F["tot_num"]); du_ws.write_number(t,5,du_totals["2026"].sum(),F["tot_num"])

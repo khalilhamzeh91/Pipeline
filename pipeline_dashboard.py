@@ -76,16 +76,20 @@ def build_book3_mapping(book3_df, pipeline_df, awarded_df):
         for m in BOOK3_MONTHS: row[f"Book3 {m}"] = b3[m]
         row["Pipeline Match"]        = pipe_match  or ""
         row["Pipeline Score"]        = pipe_score
-        row["Pipeline Gross (QAR)"]  = float(pipe_row["Total Gross"])    if pipe_row is not None else 0.0
-        row["Pipeline Net (QAR)"]    = float(pipe_row["Total Net"])      if pipe_row is not None else 0.0
-        row["Pipeline Stage"]        = str(pipe_row["Stage"])            if pipe_row is not None else ""
-        row["Pipeline AM"]           = str(pipe_row["Account Manager"])  if pipe_row is not None else ""
+        row["Pipeline Account"]      = str(pipe_row["Account Name"])       if pipe_row is not None else ""
+        row["Pipeline Gross (QAR)"]  = float(pipe_row["Total Gross"])      if pipe_row is not None else 0.0
+        row["Pipeline Net (QAR)"]    = float(pipe_row["Total Net"])        if pipe_row is not None else 0.0
+        row["Pipeline Stage"]        = str(pipe_row["Stage"])              if pipe_row is not None else ""
+        row["Pipeline AM"]           = str(pipe_row["Account Manager"])    if pipe_row is not None else ""
+        row["Pipeline Quarter"]      = str(pipe_row["Closure Due Quarter"])if pipe_row is not None else ""
         row["Awarded Match"]         = award_match or ""
         row["Awarded Score"]         = award_score
-        row["Awarded Gross (QAR)"]   = float(award_row["Total Gross"])   if award_row is not None else 0.0
-        row["Awarded Net (QAR)"]     = float(award_row["Total Net"])     if award_row is not None else 0.0
-        row["Awarded Stage"]         = str(award_row["Stage"])           if award_row is not None else ""
-        row["Awarded AM"]            = str(award_row["Account Manager"]) if award_row is not None else ""
+        row["Awarded Account"]       = str(award_row["Account Name"])      if award_row is not None else ""
+        row["Awarded Gross (QAR)"]   = float(award_row["Total Gross"])     if award_row is not None else 0.0
+        row["Awarded Net (QAR)"]     = float(award_row["Total Net"])       if award_row is not None else 0.0
+        row["Awarded Stage"]         = str(award_row["Stage"])             if award_row is not None else ""
+        row["Awarded AM"]            = str(award_row["Account Manager"])   if award_row is not None else ""
+        row["Awarded Year"]          = str(award_row["Year"])              if award_row is not None else ""
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -1341,8 +1345,10 @@ if uploaded_b3 and "🔗 Book3 Mapping" in tab_idx:
         pipe_df = df_raw if uploaded else None
 
         aw_parts2 = []
-        if uploaded_aw:   aw_parts2.append(load_awarded(uploaded_aw));   aw_parts2[-1]["Year"] = "2026"
-        if uploaded_aw25: aw_parts2.append(load_awarded(uploaded_aw25)); aw_parts2[-1]["Year"] = "2025"
+        if uploaded_aw:
+            _r = load_awarded(uploaded_aw).copy(); _r["Year"] = "2026"; aw_parts2.append(_r)
+        if uploaded_aw25:
+            _r = load_awarded(uploaded_aw25).copy(); _r["Year"] = "2025"; aw_parts2.append(_r)
         aw_df2 = pd.concat(aw_parts2, ignore_index=True) if aw_parts2 else None
 
         map_df = build_book3_mapping(b3_df, pipe_df, aw_df2)

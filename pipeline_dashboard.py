@@ -11,8 +11,83 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date
+from difflib import SequenceMatcher
 import warnings
 warnings.filterwarnings("ignore")
+
+BOOK3_MONTHS = ["Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+BOOK3_SKIP   = ["Total","Grand Total","Existing Renewal Total",
+                "Opportunity (ORF) Total","Opportunity Pipeline Total"]
+
+@st.cache_data
+def load_book3(file):
+    raw = pd.read_excel(file, header=None)
+    cols = ["_","BU","Project Type","Project Name"] + BOOK3_MONTHS + ["Grand Total"]
+    raw.columns = cols[:len(raw.columns)]
+    raw = raw.iloc[2:].reset_index(drop=True)
+    current_bu, current_type = None, None
+    rows = []
+    for _, r in raw.iterrows():
+        bu    = str(r["BU"]).strip()           if pd.notna(r["BU"])           else ""
+        ptype = str(r["Project Type"]).strip() if pd.notna(r["Project Type"]) else ""
+        name  = str(r["Project Name"]).strip() if pd.notna(r["Project Name"]) else ""
+        if bu and bu != "nan" and not any(k in bu for k in BOOK3_SKIP):
+            current_bu = bu
+        if ptype and ptype != "nan" and not any(k in ptype for k in BOOK3_SKIP):
+            current_type = ptype
+        if not name or name == "nan" or any(k in name for k in BOOK3_SKIP):
+            continue
+        if any(k in (ptype or "") for k in BOOK3_SKIP):
+            continue
+        row_data = {"BU": current_bu, "Project Type": current_type, "Project Name": name}
+        for m in BOOK3_MONTHS:
+            val = r.get(m, None)
+            try: row_data[m] = float(val) if pd.notna(val) else 0.0
+            except: row_data[m] = 0.0
+        try: row_data["Grand Total"] = float(r.get("Grand Total", 0)) if pd.notna(r.get("Grand Total")) else 0.0
+        except: row_data["Grand Total"] = 0.0
+        rows.append(row_data)
+    return pd.DataFrame(rows)
+
+def _book3_best_match(name, candidates, threshold=0.55):
+    def _clean(s): return set(re.sub(r"[^a-z0-9]"," ",str(s).lower()).split())
+    tokens = _clean(name)
+    best, best_score = None, 0.0
+    for cand in candidates:
+        cand_tokens = _clean(cand)
+        overlap = len(tokens & cand_tokens) / max(len(tokens | cand_tokens), 1)
+        seq = SequenceMatcher(None, name.lower(), cand.lower()).ratio()
+        score = max(overlap, seq)
+        if score > best_score:
+            best, best_score = cand, score
+    return (best, round(best_score, 2)) if best_score >= threshold else (None, 0.0)
+
+def build_book3_mapping(book3_df, pipeline_df, awarded_df):
+    pipe_names  = pipeline_df["Lead/Opp Name"].dropna().tolist() if pipeline_df is not None else []
+    award_names = awarded_df["Opportunity Name"].dropna().tolist() if awarded_df is not None and not awarded_df.empty else []
+    rows = []
+    for _, b3 in book3_df.iterrows():
+        pipe_match,  pipe_score  = _book3_best_match(b3["Project Name"], pipe_names)
+        award_match, award_score = _book3_best_match(b3["Project Name"], award_names)
+        pipe_row  = pipeline_df[pipeline_df["Lead/Opp Name"]==pipe_match].iloc[0]  if pipe_match  and pipeline_df is not None else None
+        award_row = awarded_df[awarded_df["Opportunity Name"]==award_match].iloc[0] if award_match and awarded_df is not None and not awarded_df.empty else None
+        row = {"Book3 BU": b3["BU"], "Book3 Project Type": b3["Project Type"],
+               "Book3 Project Name": b3["Project Name"], "Book3 Grand Total": b3["Grand Total"]}
+        for m in BOOK3_MONTHS: row[f"Book3 {m}"] = b3[m]
+        row["Pipeline Match"]        = pipe_match  or ""
+        row["Pipeline Score"]        = pipe_score
+        row["Pipeline Gross (QAR)"]  = float(pipe_row["Total Gross"])    if pipe_row is not None else 0.0
+        row["Pipeline Net (QAR)"]    = float(pipe_row["Total Net"])      if pipe_row is not None else 0.0
+        row["Pipeline Stage"]        = str(pipe_row["Stage"])            if pipe_row is not None else ""
+        row["Pipeline AM"]           = str(pipe_row["Account Manager"])  if pipe_row is not None else ""
+        row["Awarded Match"]         = award_match or ""
+        row["Awarded Score"]         = award_score
+        row["Awarded Gross (QAR)"]   = float(award_row["Total Gross"])   if award_row is not None else 0.0
+        row["Awarded Net (QAR)"]     = float(award_row["Total Net"])     if award_row is not None else 0.0
+        row["Awarded Stage"]         = str(award_row["Stage"])           if award_row is not None else ""
+        row["Awarded AM"]            = str(award_row["Account Manager"]) if award_row is not None else ""
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 st.set_page_config(
     page_title="Sales Dashboard",
@@ -210,7 +285,7 @@ def _hdr(ws, row, cols, widths, fmt):
             ws.set_column(c, c, w)
 
 @st.cache_data
-def export_pipeline_excel(file):
+def export_pipeline_excel(file, book3_file=None, awarded_file=None):
     TODAY = date.today()
     mapping = load_coa()
     df = load_data(file)
@@ -443,6 +518,60 @@ def export_pipeline_excel(file):
             bw.write(2+i,10,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",ft)
             bw.write(2+i,11,str(row["Forecasted"]) if pd.notna(row["Forecasted"]) else "",ft)
 
+        # SHEET 10 — BOOK3 MAPPING (only if Book3 uploaded)
+        if book3_file is not None:
+            b3_df   = load_book3(book3_file)
+            aw_raw2 = load_awarded(awarded_file) if awarded_file is not None else pd.DataFrame()
+            map_df  = build_book3_mapping(b3_df, df, aw_raw2)
+
+            fmt_matched   = wb.add_format({"bg_color":"#E2EFDA","border":1,"align":"left"})
+            fmt_matched_n = wb.add_format({"bg_color":"#E2EFDA","num_format":"#,##0","border":1,"align":"right"})
+            fmt_partial   = wb.add_format({"bg_color":"#FFF2CC","border":1,"align":"left"})
+            fmt_partial_n = wb.add_format({"bg_color":"#FFF2CC","num_format":"#,##0","border":1,"align":"right"})
+            fmt_nomatch   = wb.add_format({"bg_color":"#FFE0E0","border":1,"align":"left"})
+            fmt_nomatch_n = wb.add_format({"bg_color":"#FFE0E0","num_format":"#,##0","border":1,"align":"right"})
+            fmt_neg_grn   = wb.add_format({"bg_color":"#E2EFDA","num_format":"#,##0","border":1,"align":"right","font_color":"#CC0000"})
+            fmt_neg_yel   = wb.add_format({"bg_color":"#FFF2CC","num_format":"#,##0","border":1,"align":"right","font_color":"#CC0000"})
+            fmt_neg_red   = wb.add_format({"bg_color":"#FFE0E0","num_format":"#,##0","border":1,"align":"right","font_color":"#CC0000"})
+            fmt_mhdr      = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#2E5FA3","border":1,"align":"center","text_wrap":True})
+
+            mw = wb.add_worksheet("Book3 Mapping"); mw.set_zoom(80); mw.set_tab_color("#FF8C00")
+            writer.sheets["Book3 Mapping"] = mw
+            mw.freeze_panes(3, 4)
+            total_cols = 4 + len(BOOK3_MONTHS) + 12
+            mw.merge_range(0,0,0,total_cols-1,f"Book3 ↔ Pipeline & Awarded Mapping — {TODAY.strftime('%d %B %Y')}",F["title"]); mw.set_row(0,28)
+            mw.write(1,0,"🟢 Strong match (≥0.70)",fmt_matched); mw.write(1,1,"🟡 Partial match (0.55–0.69)",fmt_partial); mw.write(1,2,"🔴 No match (<0.55)",fmt_nomatch); mw.write(1,3,"",F["text"]); mw.set_row(1,18)
+            all_hdr = ["Book3 BU","Book3 Project Type","Book3 Project Name","Book3 Grand Total (QAR)"] + BOOK3_MONTHS + ["Pipeline Match","Score","Pipeline Gross","Pipeline Net","Pipeline Stage","Pipeline AM","Awarded Match","Score","Awarded Gross","Awarded Net","Awarded Stage","Awarded AM"]
+            all_wid = [36,22,42,20]+[10]*len(BOOK3_MONTHS)+[36,8,18,18,22,22,36,8,18,18,22,22]
+            for c,(h,w) in enumerate(zip(all_hdr,all_wid)):
+                mw.write(2,c,h,fmt_mhdr if h in BOOK3_MONTHS else F["header"]); mw.set_column(c,c,w)
+            mw.set_row(2,20); mw.autofilter(2,0,2+len(map_df),len(all_hdr)-1)
+
+            for i, row in map_df.reset_index(drop=True).iterrows():
+                sc = max(row["Pipeline Score"], row["Awarded Score"])
+                if sc >= 0.70:   ft,fn,fn_neg = fmt_matched,fmt_matched_n,fmt_neg_grn
+                elif sc >= 0.55: ft,fn,fn_neg = fmt_partial,fmt_partial_n,fmt_neg_yel
+                else:            ft,fn,fn_neg = fmt_nomatch,fmt_nomatch_n,fmt_neg_red
+                c=0
+                mw.write(3+i,c,str(row["Book3 BU"]) or "",ft);          c+=1
+                mw.write(3+i,c,str(row["Book3 Project Type"]) or "",ft); c+=1
+                mw.write(3+i,c,str(row["Book3 Project Name"]) or "",ft); c+=1
+                mw.write_number(3+i,c,row["Book3 Grand Total"],fn_neg);  c+=1
+                for m in BOOK3_MONTHS:
+                    mw.write_number(3+i,c,row.get(f"Book3 {m}",0),fn_neg); c+=1
+                mw.write(3+i,c,str(row["Pipeline Match"]) or "",ft);     c+=1
+                mw.write_number(3+i,c,row["Pipeline Score"],fn);          c+=1
+                mw.write_number(3+i,c,row["Pipeline Gross (QAR)"],fn);   c+=1
+                mw.write_number(3+i,c,row["Pipeline Net (QAR)"],fn);     c+=1
+                mw.write(3+i,c,str(row["Pipeline Stage"]) or "",ft);     c+=1
+                mw.write(3+i,c,str(row["Pipeline AM"]) or "",ft);        c+=1
+                mw.write(3+i,c,str(row["Awarded Match"]) or "",ft);      c+=1
+                mw.write_number(3+i,c,row["Awarded Score"],fn);           c+=1
+                mw.write_number(3+i,c,row["Awarded Gross (QAR)"],fn);    c+=1
+                mw.write_number(3+i,c,row["Awarded Net (QAR)"],fn);      c+=1
+                mw.write(3+i,c,str(row["Awarded Stage"]) or "",ft);      c+=1
+                mw.write(3+i,c,str(row["Awarded AM"]) or "",ft);         c+=1
+
     output.seek(0)
     return output.read()
 
@@ -605,9 +734,10 @@ def export_awarded_excel(file26, file25):
 
 # ── SIDEBAR ────────────────────────────────────────────────────────────────────
 st.sidebar.title("📁 Load Data")
-uploaded    = st.sidebar.file_uploader("Pipeline Excel (weekly report)", type=["xlsx","xls"])
-uploaded_aw = st.sidebar.file_uploader("Awarded Deals 2026",             type=["xlsx","xls"])
-uploaded_aw25 = st.sidebar.file_uploader("Awarded Deals 2025",           type=["xlsx","xls"])
+uploaded      = st.sidebar.file_uploader("Pipeline Excel (weekly report)", type=["xlsx","xls"])
+uploaded_aw   = st.sidebar.file_uploader("Awarded Deals 2026",             type=["xlsx","xls"])
+uploaded_aw25 = st.sidebar.file_uploader("Awarded Deals 2025",             type=["xlsx","xls"])
+uploaded_b3   = st.sidebar.file_uploader("Book3 (Resource Forecast)",      type=["xlsx","xls"])
 
 have_awarded = uploaded_aw or uploaded_aw25
 
@@ -708,7 +838,7 @@ if uploaded:
     cap_col, btn_col = st.columns([6, 2])
     cap_col.caption(f"{len(df)} opportunities after filters")
     with btn_col:
-        xl_bytes = export_pipeline_excel(uploaded)
+        xl_bytes = export_pipeline_excel(uploaded, book3_file=uploaded_b3, awarded_file=uploaded_aw)
         st.download_button(
             label="⬇️ Export Excel Report",
             data=xl_bytes,

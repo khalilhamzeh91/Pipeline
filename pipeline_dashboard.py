@@ -89,6 +89,71 @@ def build_book3_mapping(book3_df, pipeline_df, awarded_df):
         rows.append(row)
     return pd.DataFrame(rows)
 
+def _export_mapping_excel(map_df, today):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        wb = writer.book
+        fmt_title     = wb.add_format({"bold":True,"font_size":14,"font_color":"#FFFFFF","bg_color":"#1a3a6b","align":"center","valign":"vcenter"})
+        fmt_header    = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#1a3a6b","border":1,"align":"center","valign":"vcenter","text_wrap":True})
+        fmt_mhdr      = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#2E5FA3","border":1,"align":"center","text_wrap":True})
+        fmt_text      = wb.add_format({"border":1,"align":"left"})
+        fmt_matched   = wb.add_format({"bg_color":"#E2EFDA","border":1,"align":"left"})
+        fmt_matched_n = wb.add_format({"bg_color":"#E2EFDA","num_format":"#,##0","border":1,"align":"right"})
+        fmt_matched_s = wb.add_format({"bg_color":"#E2EFDA","num_format":"0.00","border":1,"align":"center"})
+        fmt_partial   = wb.add_format({"bg_color":"#FFF2CC","border":1,"align":"left"})
+        fmt_partial_n = wb.add_format({"bg_color":"#FFF2CC","num_format":"#,##0","border":1,"align":"right"})
+        fmt_partial_s = wb.add_format({"bg_color":"#FFF2CC","num_format":"0.00","border":1,"align":"center"})
+        fmt_nomatch   = wb.add_format({"bg_color":"#FFE0E0","border":1,"align":"left"})
+        fmt_nomatch_n = wb.add_format({"bg_color":"#FFE0E0","num_format":"#,##0","border":1,"align":"right"})
+        fmt_nomatch_s = wb.add_format({"bg_color":"#FFE0E0","num_format":"0.00","border":1,"align":"center"})
+        fmt_neg_grn   = wb.add_format({"bg_color":"#E2EFDA","num_format":"#,##0","border":1,"align":"right","font_color":"#CC0000"})
+        fmt_neg_yel   = wb.add_format({"bg_color":"#FFF2CC","num_format":"#,##0","border":1,"align":"right","font_color":"#CC0000"})
+        fmt_neg_red   = wb.add_format({"bg_color":"#FFE0E0","num_format":"#,##0","border":1,"align":"right","font_color":"#CC0000"})
+
+        ws = wb.add_worksheet("Book3 Mapping")
+        writer.sheets["Book3 Mapping"] = ws
+        ws.set_zoom(80); ws.set_tab_color("#FF8C00"); ws.freeze_panes(3, 4)
+        total_cols = 4 + len(BOOK3_MONTHS) + 16
+        ws.merge_range(0,0,0,total_cols-1,f"Book3 ↔ Pipeline & Awarded Mapping — {today.strftime('%d %B %Y')}",fmt_title); ws.set_row(0,28)
+        ws.write(1,0,"🟢 Strong match (score ≥ 0.70)",fmt_matched); ws.write(1,1,"🟡 Partial match (score 0.55–0.69)",fmt_partial); ws.write(1,2,"🔴 No match (score < 0.55)",fmt_nomatch); ws.write(1,3,"",fmt_text); ws.set_row(1,18)
+        headers = (["Book3 BU","Book3 Project Type","Book3 Project Name","Grand Total (QAR)"] + BOOK3_MONTHS +
+                   ["Pipeline Match","Score","Account","Gross (QAR)","Net (QAR)","Stage","AM","Quarter"] +
+                   ["Awarded Match","Score","Account","Gross (QAR)","Net (QAR)","Stage","AM","Year"])
+        widths  = [36,22,42,18]+[10]*len(BOOK3_MONTHS)+[38,8,28,16,16,20,22,10]+[38,8,28,16,16,20,22,8]
+        for c,(h,w) in enumerate(zip(headers,widths)):
+            ws.write(2,c,h,fmt_mhdr if h in BOOK3_MONTHS else fmt_header); ws.set_column(c,c,w)
+        ws.set_row(2,20); ws.autofilter(2,0,2+len(map_df),len(headers)-1)
+        for i, row in map_df.reset_index(drop=True).iterrows():
+            sc = max(row["Pipeline Score"], row["Awarded Score"])
+            if sc >= 0.70:   ft,fn,fs,fn_neg = fmt_matched,fmt_matched_n,fmt_matched_s,fmt_neg_grn
+            elif sc >= 0.55: ft,fn,fs,fn_neg = fmt_partial,fmt_partial_n,fmt_partial_s,fmt_neg_yel
+            else:            ft,fn,fs,fn_neg = fmt_nomatch,fmt_nomatch_n,fmt_nomatch_s,fmt_neg_red
+            c=0
+            ws.write(3+i,c,str(row["Book3 BU"]) or "",ft);          c+=1
+            ws.write(3+i,c,str(row["Book3 Project Type"]) or "",ft); c+=1
+            ws.write(3+i,c,str(row["Book3 Project Name"]) or "",ft); c+=1
+            ws.write_number(3+i,c,row["Book3 Grand Total"],fn_neg);  c+=1
+            for m in BOOK3_MONTHS:
+                ws.write_number(3+i,c,row.get(f"Book3 {m}",0),fn_neg); c+=1
+            ws.write(3+i,c,str(row["Pipeline Match"]) or "",ft);     c+=1
+            ws.write_number(3+i,c,row["Pipeline Score"],fs);          c+=1
+            ws.write(3+i,c,str(row["Pipeline Account"]) or "",ft);   c+=1
+            ws.write_number(3+i,c,row["Pipeline Gross (QAR)"],fn);   c+=1
+            ws.write_number(3+i,c,row["Pipeline Net (QAR)"],fn);     c+=1
+            ws.write(3+i,c,str(row["Pipeline Stage"]) or "",ft);     c+=1
+            ws.write(3+i,c,str(row["Pipeline AM"]) or "",ft);        c+=1
+            ws.write(3+i,c,str(row["Pipeline Quarter"]) or "",ft);   c+=1
+            ws.write(3+i,c,str(row["Awarded Match"]) or "",ft);      c+=1
+            ws.write_number(3+i,c,row["Awarded Score"],fs);           c+=1
+            ws.write(3+i,c,str(row["Awarded Account"]) or "",ft);    c+=1
+            ws.write_number(3+i,c,row["Awarded Gross (QAR)"],fn);    c+=1
+            ws.write_number(3+i,c,row["Awarded Net (QAR)"],fn);      c+=1
+            ws.write(3+i,c,str(row["Awarded Stage"]) or "",ft);      c+=1
+            ws.write(3+i,c,str(row["Awarded AM"]) or "",ft);         c+=1
+            ws.write(3+i,c,str(row["Awarded Year"]) or "",ft);       c+=1
+    output.seek(0)
+    return output.read()
+
 st.set_page_config(
     page_title="Sales Dashboard",
     page_icon="📊",
@@ -770,6 +835,7 @@ st.caption(f"Report date: {date.today().strftime('%d %B %Y')}")
 tab_labels = []
 if uploaded:     tab_labels.append("🔵 Pipeline")
 if have_awarded: tab_labels.append("🟢 Awarded Deals")
+if uploaded_b3:  tab_labels.append("🔗 Book3 Mapping")
 tabs = st.tabs(tab_labels)
 tab_idx = {name: i for i, name in enumerate(tab_labels)}
 
@@ -1264,6 +1330,90 @@ if have_awarded:
     st.dataframe(disp_aw[aw_cols].sort_values("Total Net", ascending=False)
                  .style.format({"Total Gross":"{:,.0f}","Total Net":"{:,.0f}","Project Value":"{:,.0f}"}),
                  use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BOOK3 MAPPING TAB
+# ══════════════════════════════════════════════════════════════════════════════
+if uploaded_b3 and "🔗 Book3 Mapping" in tab_idx:
+  with tabs[tab_idx["🔗 Book3 Mapping"]]:
+    with st.spinner("Running mapping..."):
+        b3_df   = load_book3(uploaded_b3)
+        pipe_df = df_raw if uploaded else None
+
+        aw_parts2 = []
+        if uploaded_aw:   aw_parts2.append(load_awarded(uploaded_aw));   aw_parts2[-1]["Year"] = "2026"
+        if uploaded_aw25: aw_parts2.append(load_awarded(uploaded_aw25)); aw_parts2[-1]["Year"] = "2025"
+        aw_df2 = pd.concat(aw_parts2, ignore_index=True) if aw_parts2 else None
+
+        map_df = build_book3_mapping(b3_df, pipe_df, aw_df2)
+
+    total_b3  = len(map_df)
+    strong_b3 = len(map_df[map_df[["Pipeline Score","Awarded Score"]].max(axis=1) >= 0.70])
+    partial_b3= len(map_df[(map_df[["Pipeline Score","Awarded Score"]].max(axis=1) >= 0.55) &
+                            (map_df[["Pipeline Score","Awarded Score"]].max(axis=1) <  0.70)])
+    nomatch_b3= total_b3 - strong_b3 - partial_b3
+
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Total Book3 Projects", total_b3)
+    k2.metric("🟢 Strong Match",  strong_b3)
+    k3.metric("🟡 Partial Match", partial_b3)
+    k4.metric("🔴 No Match",      nomatch_b3)
+
+    st.markdown("---")
+
+    fc1, fc2, fc3 = st.columns(3)
+    with fc1:
+        bu_opts3 = sorted(map_df["Book3 BU"].dropna().unique().tolist())
+        sel_bu3  = st.multiselect("Filter by BU", bu_opts3, default=[], key="b3_bu")
+    with fc2:
+        type_opts3 = sorted(map_df["Book3 Project Type"].dropna().unique().tolist())
+        sel_type3  = st.multiselect("Filter by Project Type", type_opts3, default=[], key="b3_type")
+    with fc3:
+        match_map3 = {"All": None, "🟢 Strong (≥0.70)": "strong", "🟡 Partial (0.55–0.69)": "partial", "🔴 No Match (<0.55)": "nomatch"}
+        sel_match3 = st.selectbox("Filter by Match Quality", list(match_map3.keys()), key="b3_match")
+
+    view3 = map_df.copy()
+    if sel_bu3:   view3 = view3[view3["Book3 BU"].isin(sel_bu3)]
+    if sel_type3: view3 = view3[view3["Book3 Project Type"].isin(sel_type3)]
+    sc3 = view3[["Pipeline Score","Awarded Score"]].max(axis=1)
+    if match_map3[sel_match3] == "strong":   view3 = view3[sc3 >= 0.70]
+    elif match_map3[sel_match3] == "partial":view3 = view3[(sc3 >= 0.55) & (sc3 < 0.70)]
+    elif match_map3[sel_match3] == "nomatch":view3 = view3[sc3 < 0.55]
+
+    st.caption(f"Showing {len(view3)} of {total_b3} projects")
+
+    def _color_map_row(row):
+        sc = max(row["Pipeline Score"], row["Awarded Score"])
+        c = "#E2EFDA" if sc >= 0.70 else ("#FFF2CC" if sc >= 0.55 else "#FFE0E0")
+        return [f"background-color: {c}"] * len(row)
+
+    disp_cols3 = [
+        "Book3 BU","Book3 Project Type","Book3 Project Name","Book3 Grand Total",
+        "Pipeline Match","Pipeline Score","Pipeline Gross (QAR)","Pipeline Net (QAR)","Pipeline Stage","Pipeline AM","Pipeline Quarter",
+        "Awarded Match","Awarded Score","Awarded Gross (QAR)","Awarded Net (QAR)","Awarded Stage","Awarded AM","Awarded Year",
+    ]
+    st.dataframe(
+        view3[disp_cols3].style.apply(_color_map_row, axis=1).format({
+            "Book3 Grand Total":    "{:,.0f}",
+            "Pipeline Score":       "{:.2f}",
+            "Pipeline Gross (QAR)": "{:,.0f}",
+            "Pipeline Net (QAR)":   "{:,.0f}",
+            "Awarded Score":        "{:.2f}",
+            "Awarded Gross (QAR)":  "{:,.0f}",
+            "Awarded Net (QAR)":    "{:,.0f}",
+        }),
+        use_container_width=True, height=500, hide_index=True,
+    )
+
+    st.markdown("---")
+    xl_b3 = _export_mapping_excel(map_df, date.today())
+    st.download_button(
+        label="⬇️ Export Mapping to Excel",
+        data=xl_b3,
+        file_name=f"Book3_Mapping_{date.today()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")

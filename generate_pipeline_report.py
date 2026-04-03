@@ -890,29 +890,20 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     bd_exp = _expand_deals(df, "Lead/Opp Name")
     bw.autofilter(1, 0, 1 + len(bd_exp), ncols - 1)
 
-    prev_deal_idx = None
-    alt_toggle = False
-    for _, row in bd_exp.iterrows():
-        didx     = row["_deal_idx"]
-        is_first = bool(row["_is_first"])
-        if didx != prev_deal_idx:
-            alt_toggle = not alt_toggle
-            prev_deal_idx = didx
-        alt  = alt_toggle
-        top  = 2 if is_first else 1
-        bg   = CLR["alt_a"] if alt else CLR["alt_b"]
-        ft   = (ft_a_first if is_first else ft_a_next) if alt else (ft_b_first if is_first else ft_b_next)
-        fn   = (fn_a_first if is_first else fn_a_next) if alt else (fn_b_first if is_first else fn_b_next)
-        fbu  = (fb_a_first if is_first else fb_a_next) if alt else (fb_b_first if is_first else fb_b_next)
-        fdu  = (fd_a_first if is_first else fd_a_next) if alt else (fd_b_first if is_first else fd_b_next)
-        fxn  = (fx_a_first if is_first else fx_a_next) if alt else (fx_b_first if is_first else fx_b_next)
+    col_map = {name: idx for idx, (name, _, __) in enumerate(bd_output_cols)}
+    g_col = col_map["Gross (breakdown)"]   # column index for SUM formula
+    n_col = col_map["Net (breakdown)"]
 
-        r_out = _  # xlsxwriter row = 2 + position in iterable
-        # We need a counter — use enumerate approach instead
-        # We'll collect and write below
-        pass
+    # Pre-compute Excel row range per deal (xl_r = 2 + r_pos, Excel row = xl_r + 1)
+    deal_rows = {}
+    for r_pos, (_, row) in enumerate(bd_exp.iterrows()):
+        didx = row["_deal_idx"]
+        xl_r = 2 + r_pos
+        if didx not in deal_rows:
+            deal_rows[didx] = [xl_r, xl_r]
+        else:
+            deal_rows[didx][1] = xl_r
 
-    # Re-iterate with enumerate for row index
     prev_deal_idx = None
     alt_toggle = False
     for r_pos, (_, row) in enumerate(bd_exp.iterrows()):
@@ -922,11 +913,10 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
             alt_toggle = not alt_toggle
             prev_deal_idx = didx
         alt = alt_toggle
-        ft   = (ft_a_first if is_first else ft_a_next) if alt else (ft_b_first if is_first else ft_b_next)
-        fn   = (fn_a_first if is_first else fn_a_next) if alt else (fn_b_first if is_first else fn_b_next)
-        fbu  = (fb_a_first if is_first else fb_a_next) if alt else (fb_b_first if is_first else fb_b_next)
-        fdu  = (fd_a_first if is_first else fd_a_next) if alt else (fd_b_first if is_first else fd_b_next)
-        fxn  = (fx_a_first if is_first else fx_a_next) if alt else (fx_b_first if is_first else fx_b_next)
+        ft  = (ft_a_first if is_first else ft_a_next) if alt else (ft_b_first if is_first else ft_b_next)
+        fbu = (fb_a_first if is_first else fb_a_next) if alt else (fb_b_first if is_first else fb_b_next)
+        fdu = (fd_a_first if is_first else fd_a_next) if alt else (fd_b_first if is_first else fd_b_next)
+        fxn = (fx_a_first if is_first else fx_a_next) if alt else (fx_b_first if is_first else fx_b_next)
         xl_r = 2 + r_pos
 
         def _ws(col_idx, val, fmt):
@@ -942,44 +932,42 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
             else:
                 bw.write_number(xl_r, col_idx, v, fmt)
 
-        col_map = {name: idx for idx, (name, _, __) in enumerate(bd_output_cols)}
-
-        # Deal-level cols (first row only)
-        _ws(col_map["SNo."],                 row.get("SNo.")                  if is_first else None, ft)
-        _ws(col_map["Account Name"],          row.get("Account Name")          if is_first else None, ft)
-        _ws(col_map["Lead/Opp Name"],         row.get("Lead/Opp Name")         if is_first else None, ft)
-        # BU / DU (always)
-        _ws(col_map["BU"],  row.get("BU_exp"),  fbu)
-        _ws(col_map["DU"],  row.get("DU_exp"),  fdu)
-        # Breakdown numbers (always)
-        _wn(col_map["Gross (breakdown)"],     row.get("Gross_exp"), fxn)
-        _wn(col_map["Net (breakdown)"],       row.get("Net_exp"),   fxn)
-        # Total Gross / Net (first row only)
+        # SNo. — first row only (sequence number)
+        _ws(col_map["SNo."], row.get("SNo.") if is_first else None, ft)
+        # Deal-level cols — replicated on every DU row
+        _ws(col_map["Account Name"],  row.get("Account Name"),  ft)
+        _ws(col_map["Lead/Opp Name"], row.get("Lead/Opp Name"), ft)
+        # BU / DU — always
+        _ws(col_map["BU"], row.get("BU_exp"), fbu)
+        _ws(col_map["DU"], row.get("DU_exp"), fdu)
+        # Breakdown numbers — always
+        _wn(col_map["Gross (breakdown)"], row.get("Gross_exp"), fxn)
+        _wn(col_map["Net (breakdown)"],   row.get("Net_exp"),   fxn)
+        # Total Gross / Net — SUM formula on first row, blank on others
         if is_first:
-            _wn(col_map["Total Gross"], row.get("Total Gross"), ft_tot)
-            _wn(col_map["Total Net"],   row.get("Total Net"),   ft_tot)
+            r0, r1 = deal_rows[didx]
+            gc = chr(65 + g_col); nc = chr(65 + n_col)
+            bw.write_formula(xl_r, col_map["Total Gross"], f"=SUM({gc}{r0+1}:{gc}{r1+1})", ft_tot)
+            bw.write_formula(xl_r, col_map["Total Net"],   f"=SUM({nc}{r0+1}:{nc}{r1+1})", ft_tot)
         else:
             bw.write_blank(xl_r, col_map["Total Gross"], None, ft_tot_blank)
             bw.write_blank(xl_r, col_map["Total Net"],   None, ft_tot_blank)
-        # Other deal-level cols
-        _ws(col_map["Stage"],                 row.get("Stage")                 if is_first else None, ft)
-        _ws(col_map["Account Manager"],       row.get("Account Manager")       if is_first else None, ft)
-        _ws(col_map["Sector"],                row.get("Sector")                if is_first else None, ft)
-        _ws(col_map["Closure Due Quarter"],   row.get("Closure Due Quarter")   if is_first else None, ft)
-        _ws(col_map["Winning Probability"],   row.get("Winning Probability")   if is_first else None, ft)
-        _ws(col_map["Forecasted"],            row.get("Forecasted")            if is_first else None, ft)
-        _ws(col_map["Strategic Opportunity"], row.get("Strategic Opportunity") if is_first else None, ft)
-        # Est. Close Date (date format, first row only)
+        # Other deal-level cols — replicated on every DU row
+        _ws(col_map["Stage"],                 row.get("Stage"),                 ft)
+        _ws(col_map["Account Manager"],       row.get("Account Manager"),       ft)
+        _ws(col_map["Sector"],                row.get("Sector"),                ft)
+        _ws(col_map["Closure Due Quarter"],   row.get("Closure Due Quarter"),   ft)
+        _ws(col_map["Winning Probability"],   row.get("Winning Probability"),   ft)
+        _ws(col_map["Forecasted"],            row.get("Forecasted"),            ft)
+        _ws(col_map["Strategic Opportunity"], row.get("Strategic Opportunity"), ft)
+        # Est. Close Date — replicated on every row
         cd_idx = col_map["Est. Close Date"]
-        if is_first:
-            cd_val = row.get("Est. Close Date")
-            if pd.notna(cd_val):
-                try:
-                    bw.write_datetime(xl_r, cd_idx, pd.Timestamp(cd_val).to_pydatetime(), ft_date)
-                except Exception:
-                    bw.write(xl_r, cd_idx, str(cd_val), ft_date)
-            else:
-                bw.write_blank(xl_r, cd_idx, None, ft_date)
+        cd_val = row.get("Est. Close Date")
+        if pd.notna(cd_val):
+            try:
+                bw.write_datetime(xl_r, cd_idx, pd.Timestamp(cd_val).to_pydatetime(), ft_date)
+            except Exception:
+                bw.write(xl_r, cd_idx, str(cd_val), ft_date)
         else:
             bw.write_blank(xl_r, cd_idx, None, ft_date_blank)
 

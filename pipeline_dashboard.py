@@ -656,6 +656,13 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
         bd_exp = _expand_deals(df, mapping=mapping)
         bw.autofilter(1,0,1+len(bd_exp),bd_nc-1)
         bd_cmap={cn:idx for idx,(cn,_,__) in enumerate(bd_ocols)}
+        # Pre-compute Excel row range per deal for SUM formulas
+        bd_deal_rows={}
+        for rp,(_, row) in enumerate(bd_exp.iterrows()):
+            _di=row["_deal_idx"]; _xr=2+rp
+            if _di not in bd_deal_rows: bd_deal_rows[_di]=[_xr,_xr]
+            else: bd_deal_rows[_di][1]=_xr
+        bd_gcol=bd_cmap["Gross (breakdown)"]; bd_ncol=bd_cmap["Net (breakdown)"]
         bd_prev=None; bd_alt=False
         for rp,(_, row) in enumerate(bd_exp.iterrows()):
             didx=row["_deal_idx"]; isf=bool(row["_is_first"])
@@ -671,33 +678,32 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
                 v=_parse_num(val) if not isinstance(val,(int,float)) else val
                 if v is None or (isinstance(v,float) and pd.isna(v)): bw.write_blank(xl_r,ci,None,fmt)
                 else: bw.write_number(xl_r,ci,v,fmt)
-            _bws(bd_cmap["SNo."],              row.get("SNo.")               if isf else None,ft)
-            _bws(bd_cmap["Account Name"],       row.get("Account Name")       if isf else None,ft)
-            _bws(bd_cmap["Lead/Opp Name"],      row.get("Lead/Opp Name")      if isf else None,ft)
+            _bws(bd_cmap["SNo."],              row.get("SNo.") if isf else None,ft)
+            _bws(bd_cmap["Account Name"],       row.get("Account Name"),ft)
+            _bws(bd_cmap["Lead/Opp Name"],      row.get("Lead/Opp Name"),ft)
             _bws(bd_cmap["BU"],row.get("BU_exp"),fbu); _bws(bd_cmap["DU"],row.get("DU_exp"),fdu)
             _bwn(bd_cmap["Gross (breakdown)"],  row.get("Gross_exp"),fxn)
             _bwn(bd_cmap["Net (breakdown)"],    row.get("Net_exp"),  fxn)
             if isf:
-                _bwn(bd_cmap["Total Gross"],row.get("Total Gross"),bd_ftot)
-                _bwn(bd_cmap["Total Net"],  row.get("Total Net"),  bd_ftot)
+                r0,r1=bd_deal_rows[didx]; gc=chr(65+bd_gcol); nc=chr(65+bd_ncol)
+                bw.write_formula(xl_r,bd_cmap["Total Gross"],f"=SUM({gc}{r0+1}:{gc}{r1+1})",bd_ftot)
+                bw.write_formula(xl_r,bd_cmap["Total Net"],  f"=SUM({nc}{r0+1}:{nc}{r1+1})",bd_ftot)
             else:
                 bw.write_blank(xl_r,bd_cmap["Total Gross"],None,bd_ftotbl)
                 bw.write_blank(xl_r,bd_cmap["Total Net"],  None,bd_ftotbl)
-            _bws(bd_cmap["Stage"],              row.get("Stage")              if isf else None,ft)
-            _bws(bd_cmap["Account Manager"],    row.get("Account Manager")    if isf else None,ft)
-            _bws(bd_cmap["Sector"],             row.get("Sector")             if isf else None,ft)
-            _bws(bd_cmap["Closure Due Quarter"],row.get("Closure Due Quarter")if isf else None,ft)
-            _bws(bd_cmap["Winning Probability"],row.get("Winning Probability")if isf else None,ft)
-            _bws(bd_cmap["Forecasted"],         row.get("Forecasted")         if isf else None,ft)
-            _bws(bd_cmap["Strategic Opportunity"],row.get("Strategic Opportunity") if isf else None,ft)
+            _bws(bd_cmap["Stage"],              row.get("Stage"),ft)
+            _bws(bd_cmap["Account Manager"],    row.get("Account Manager"),ft)
+            _bws(bd_cmap["Sector"],             row.get("Sector"),ft)
+            _bws(bd_cmap["Closure Due Quarter"],row.get("Closure Due Quarter"),ft)
+            _bws(bd_cmap["Winning Probability"],row.get("Winning Probability"),ft)
+            _bws(bd_cmap["Forecasted"],         row.get("Forecasted"),ft)
+            _bws(bd_cmap["Strategic Opportunity"],row.get("Strategic Opportunity"),ft)
             cd_i=bd_cmap["Est. Close Date"]
-            if isf:
-                cd_v=row.get("Est. Close Date")
-                if pd.notna(cd_v):
-                    try: bw.write_datetime(xl_r,cd_i,pd.Timestamp(cd_v).to_pydatetime(),bd_fdate)
-                    except Exception: bw.write(xl_r,cd_i,str(cd_v),bd_fdate)
-                else: bw.write_blank(xl_r,cd_i,None,bd_fdate)
-            else: bw.write_blank(xl_r,cd_i,None,bd_fdatebl)
+            cd_v=row.get("Est. Close Date")
+            if pd.notna(cd_v):
+                try: bw.write_datetime(xl_r,cd_i,pd.Timestamp(cd_v).to_pydatetime(),bd_fdate)
+                except Exception: bw.write(xl_r,cd_i,str(cd_v),bd_fdate)
+            else: bw.write_blank(xl_r,cd_i,None,bd_fdate if isf else bd_fdatebl)
 
         # SHEET 10 — BOOK3 MAPPING (only if Book3 uploaded)
         if book3_file is not None:
@@ -954,6 +960,13 @@ def export_awarded_excel(file26, file25):
         aw_exp=_expand_deals(df,mapping=aw_coa)
         aw_bw.autofilter(1,0,1+len(aw_exp),aw_nc-1)
         aw_cm={cn:idx for idx,(cn,_,__) in enumerate(aw_oc)}
+        # Pre-compute Excel row range per deal for SUM formulas
+        aw_deal_rows={}
+        for rp,(_, row) in enumerate(aw_exp.iterrows()):
+            _di=row["_deal_idx"]; _xr=2+rp
+            if _di not in aw_deal_rows: aw_deal_rows[_di]=[_xr,_xr]
+            else: aw_deal_rows[_di][1]=_xr
+        aw_gcol=aw_cm["Gross (breakdown)"]; aw_ncol=aw_cm["Net (breakdown)"]
         aw_prev=None; aw_alt=False
         for rp,(_, row) in enumerate(aw_exp.iterrows()):
             didx=row["_deal_idx"]; isf=bool(row["_is_first"])
@@ -969,23 +982,24 @@ def export_awarded_excel(file26, file25):
                 v=_parse_num(val) if not isinstance(val,(int,float)) else val
                 if v is None or (isinstance(v,float) and pd.isna(v)): aw_bw.write_blank(xl_r,ci,None,fmt)
                 else: aw_bw.write_number(xl_r,ci,v,fmt)
-            _aws(aw_cm["SNo."],             row.get("SNo.")             if isf else None,ft)
-            _aws(aw_cm["Account Name"],      row.get("Account Name")     if isf else None,ft)
-            _aws(aw_cm["Opportunity Name"],  row.get("Opportunity Name") if isf else None,ft)
+            _aws(aw_cm["SNo."],             row.get("SNo.") if isf else None,ft)
+            _aws(aw_cm["Account Name"],      row.get("Account Name"),ft)
+            _aws(aw_cm["Opportunity Name"],  row.get("Opportunity Name"),ft)
             _aws(aw_cm["BU"],row.get("BU_exp"),fbu); _aws(aw_cm["DU"],row.get("DU_exp"),fdu)
             _awn(aw_cm["Gross (breakdown)"], row.get("Gross_exp"),fxn)
             _awn(aw_cm["Net (breakdown)"],   row.get("Net_exp"),  fxn)
             if isf:
-                _awn(aw_cm["Total Gross"],row.get("Total Gross"),aw_ftot)
-                _awn(aw_cm["Total Net"],  row.get("Total Net"),  aw_ftot)
+                r0,r1=aw_deal_rows[didx]; gc=chr(65+aw_gcol); nc=chr(65+aw_ncol)
+                aw_bw.write_formula(xl_r,aw_cm["Total Gross"],f"=SUM({gc}{r0+1}:{gc}{r1+1})",aw_ftot)
+                aw_bw.write_formula(xl_r,aw_cm["Total Net"],  f"=SUM({nc}{r0+1}:{nc}{r1+1})",aw_ftot)
             else:
                 aw_bw.write_blank(xl_r,aw_cm["Total Gross"],None,aw_ftotbl)
                 aw_bw.write_blank(xl_r,aw_cm["Total Net"],  None,aw_ftotbl)
-            _aws(aw_cm["Stage"],        row.get("Stage")         if isf else None,ft)
-            _aws(aw_cm["Account Manager"],row.get("Account Manager") if isf else None,ft)
-            _aws(aw_cm["Award Quarter"],row.get("Award Quarter") if isf else None,ft)
-            _aws(aw_cm["Contracted"],   row.get("Contracted")    if isf else None,ft)
-            _aws(aw_cm["Year"],         row.get("Year")          if isf else None,ft)
+            _aws(aw_cm["Stage"],         row.get("Stage"),ft)
+            _aws(aw_cm["Account Manager"],row.get("Account Manager"),ft)
+            _aws(aw_cm["Award Quarter"], row.get("Award Quarter"),ft)
+            _aws(aw_cm["Contracted"],    row.get("Contracted"),ft)
+            _aws(aw_cm["Year"],          row.get("Year"),ft)
 
     output.seek(0)
     return output.read()

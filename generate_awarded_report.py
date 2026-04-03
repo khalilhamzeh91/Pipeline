@@ -600,6 +600,19 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     aw_bw.autofilter(1, 0, 1 + len(aw_exp), aw_ncols - 1)
 
     aw_col_map = {name: idx for idx, (name, _, __) in enumerate(aw_output_cols)}
+
+    # Pre-compute Excel row range per deal for SUM formulas
+    aw_deal_rows = {}
+    for r_pos, (_, row) in enumerate(aw_exp.iterrows()):
+        didx = row["_deal_idx"]
+        xl_r = 2 + r_pos
+        if didx not in aw_deal_rows:
+            aw_deal_rows[didx] = [xl_r, xl_r]
+        else:
+            aw_deal_rows[didx][1] = xl_r
+    aw_g_col = aw_col_map["Gross (breakdown)"]
+    aw_n_col = aw_col_map["Net (breakdown)"]
+
     prev_deal_idx = None
     alt_toggle = False
     for r_pos, (_, row) in enumerate(aw_exp.iterrows()):
@@ -629,23 +642,26 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
             else:
                 aw_bw.write_number(xl_r, col_idx, v, fmt)
 
-        _aws(aw_col_map["SNo."],             row.get("SNo.")             if is_first else None, ft)
-        _aws(aw_col_map["Account Name"],      row.get("Account Name")     if is_first else None, ft)
-        _aws(aw_col_map["Opportunity Name"],  row.get("Opportunity Name") if is_first else None, ft)
+        # SNo. only on first row; deal-level fields replicated on all rows
+        _aws(aw_col_map["SNo."],             row.get("SNo.") if is_first else None, ft)
+        _aws(aw_col_map["Account Name"],      row.get("Account Name"),      ft)
+        _aws(aw_col_map["Opportunity Name"],  row.get("Opportunity Name"),  ft)
         _aws(aw_col_map["BU"],  row.get("BU_exp"),  fbu)
         _aws(aw_col_map["DU"],  row.get("DU_exp"),  fdu)
         _awn(aw_col_map["Gross (breakdown)"], row.get("Gross_exp"), fxn)
         _awn(aw_col_map["Net (breakdown)"],   row.get("Net_exp"),   fxn)
         if is_first:
-            _awn(aw_col_map["Total Gross"], row.get("Total Gross"), aw_ft_tot)
-            _awn(aw_col_map["Total Net"],   row.get("Total Net"),   aw_ft_tot)
+            r0, r1 = aw_deal_rows[didx]
+            gc = chr(65 + aw_g_col); nc = chr(65 + aw_n_col)
+            aw_bw.write_formula(xl_r, aw_col_map["Total Gross"], f"=SUM({gc}{r0+1}:{gc}{r1+1})", aw_ft_tot)
+            aw_bw.write_formula(xl_r, aw_col_map["Total Net"],   f"=SUM({nc}{r0+1}:{nc}{r1+1})", aw_ft_tot)
         else:
             aw_bw.write_blank(xl_r, aw_col_map["Total Gross"], None, aw_ft_tot_blank)
             aw_bw.write_blank(xl_r, aw_col_map["Total Net"],   None, aw_ft_tot_blank)
-        _aws(aw_col_map["Stage"],         row.get("Stage")         if is_first else None, ft)
-        _aws(aw_col_map["Account Manager"],row.get("Account Manager") if is_first else None, ft)
-        _aws(aw_col_map["Award Quarter"], row.get("Award Quarter") if is_first else None, ft)
-        _aws(aw_col_map["Contracted"],    row.get("Contracted")    if is_first else None, ft)
-        _aws(aw_col_map["Year"],          row.get("Year")          if is_first else None, ft)
+        _aws(aw_col_map["Stage"],          row.get("Stage"),          ft)
+        _aws(aw_col_map["Account Manager"], row.get("Account Manager"), ft)
+        _aws(aw_col_map["Award Quarter"],  row.get("Award Quarter"),  ft)
+        _aws(aw_col_map["Contracted"],     row.get("Contracted"),     ft)
+        _aws(aw_col_map["Year"],           row.get("Year"),           ft)
 
 print(f"Done! Saved: {OUT_FILE}")

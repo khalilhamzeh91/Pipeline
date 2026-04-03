@@ -49,6 +49,49 @@ def du_to_bu(du_str):
         return DU_TO_BU.get(m.group(1), "Unknown")
     return "Unknown"
 
+# ── EXPANSION HELPERS ─────────────────────────────────────────────────────────
+def _split_field(value):
+    if pd.isna(value) or str(value).strip() in ("", "nan"):
+        return []
+    return [x.strip() for x in str(value).replace(", \n", "\n").replace(",\n", "\n").split("\n") if x.strip()]
+
+def _parse_num(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except Exception:
+        return None
+
+def _expand_deals(df_in, opp_col=None):  # noqa: ARG001
+    rows = []
+    for deal_idx, row in df_in.iterrows():
+        du_parts = _split_field(row.get("DU", ""))
+        gr_parts = _split_field(row.get("Gross (breakdown)", ""))
+        nt_parts = _split_field(row.get("Net (breakdown)", ""))
+        if not du_parts:
+            du_parts = [str(row.get("DU", ""))]
+        n = len(du_parts)
+        def av(parts, n):
+            if len(parts) == n:
+                return parts
+            if len(parts) <= 1:
+                return (parts or [None]) + [None] * (n - 1)
+            return [parts[0]] + [None] * (n - 1)
+        gr = av(gr_parts, n)
+        nt = av(nt_parts, n)
+        for i, du in enumerate(du_parts):
+            nr = {c: row.get(c) for c in df_in.columns}
+            nr["BU_exp"]    = du_to_bu(du)
+            nr["DU_exp"]    = du
+            nr["Gross_exp"] = _parse_num(gr[i])
+            nr["Net_exp"]   = _parse_num(nt[i])
+            nr["_is_first"] = (i == 0)
+            nr["_du_count"] = n
+            nr["_deal_idx"] = deal_idx
+            rows.append(nr)
+    return pd.DataFrame(rows)
+
 # ── DU EXPLOSION ─────────────────────────────────────────────────────────────
 du_rows = []
 for _, row in df.iterrows():
@@ -755,39 +798,190 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         pw.write(2+r, 16, "YES" if is_overdue else "", t_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SHEET 8 — PIPELINE BREAKDOWN (one row per DU per opportunity)
+    # SHEET 8 — PIPELINE BREAKDOWN (styled, one row per DU per opportunity)
     # ════════════════════════════════════════════════════════════════════════
+    CLR = {
+        "title_bg":    "1F3864",
+        "hdr_deal":    "1F3864",
+        "hdr_du":      "17375E",
+        "hdr_finance": "1F4E79",
+        "hdr_other":   "2E5FA3",
+        "bu_fill":     "EDF2F9",
+        "du_fill":     "E4ECF7",
+        "num_fill":    "EBF5FB",
+        "tot_fill":    "D5E8F5",
+        "date_fill":   "FFF2CC",
+        "alt_a":       "F5F8FF",
+        "alt_b":       "FFFFFF",
+    }
+    fh_deal    = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+CLR["hdr_deal"],   "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+    fh_du      = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+CLR["hdr_du"],     "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+    fh_finance = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+CLR["hdr_finance"],"border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+    fh_other   = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+CLR["hdr_other"],  "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+    fmt_title_bd = wb.add_format({"bold":True,"font_size":13,"font_color":"#FFFFFF","bg_color":"#"+CLR["title_bg"],"align":"center","valign":"vcenter"})
+
+    def _bd_fmt(wb, bg, top, num_fmt=None, extra=None):
+        d = {"bg_color":"#"+bg,"top":top,"bottom":1,"left":1,"right":1,"font_size":9}
+        if num_fmt:
+            d["num_format"] = num_fmt
+            d["align"] = "right"
+        if extra:
+            d.update(extra)
+        return wb.add_format(d)
+
+    ft_a_first  = _bd_fmt(wb, CLR["alt_a"], 2)
+    ft_a_next   = _bd_fmt(wb, CLR["alt_a"], 1)
+    ft_b_first  = _bd_fmt(wb, CLR["alt_b"], 2)
+    ft_b_next   = _bd_fmt(wb, CLR["alt_b"], 1)
+    fn_a_first  = _bd_fmt(wb, CLR["alt_a"], 2, "#,##0")
+    fn_a_next   = _bd_fmt(wb, CLR["alt_a"], 1, "#,##0")
+    fn_b_first  = _bd_fmt(wb, CLR["alt_b"], 2, "#,##0")
+    fn_b_next   = _bd_fmt(wb, CLR["alt_b"], 1, "#,##0")
+    fb_a_first  = _bd_fmt(wb, CLR["bu_fill"], 2)
+    fb_a_next   = _bd_fmt(wb, CLR["bu_fill"], 1)
+    fb_b_first  = _bd_fmt(wb, CLR["bu_fill"], 2)
+    fb_b_next   = _bd_fmt(wb, CLR["bu_fill"], 1)
+    fd_a_first  = _bd_fmt(wb, CLR["du_fill"], 2)
+    fd_a_next   = _bd_fmt(wb, CLR["du_fill"], 1)
+    fd_b_first  = _bd_fmt(wb, CLR["du_fill"], 2)
+    fd_b_next   = _bd_fmt(wb, CLR["du_fill"], 1)
+    fx_a_first  = _bd_fmt(wb, CLR["num_fill"], 2, "#,##0")
+    fx_a_next   = _bd_fmt(wb, CLR["num_fill"], 1, "#,##0")
+    fx_b_first  = _bd_fmt(wb, CLR["num_fill"], 2, "#,##0")
+    fx_b_next   = _bd_fmt(wb, CLR["num_fill"], 1, "#,##0")
+    ft_tot      = wb.add_format({"bg_color":"#"+CLR["tot_fill"],"num_format":"#,##0","border":1,"align":"right","bold":True,"font_size":9})
+    ft_tot_blank= wb.add_format({"bg_color":"#"+CLR["num_fill"],"border":1,"font_size":9})
+    ft_date     = wb.add_format({"bg_color":"#"+CLR["date_fill"],"border":1,"align":"center","num_format":"DD-MMM-YYYY","font_size":9})
+    ft_date_blank = wb.add_format({"bg_color":"#"+CLR["alt_a"],"border":1,"font_size":9})
+
     bw = wb.add_worksheet("Pipeline Breakdown")
     bw.set_zoom(85)
     bw.set_tab_color("#9370DB")
-    bw.merge_range("A1:L1", "Pipeline Breakdown — One Row per BU / DU per Opportunity", fmt_title)
+
+    bd_output_cols = [
+        ("SNo.",                  6,  "deal"),
+        ("Account Name",         24,  "deal"),
+        ("Lead/Opp Name",        36,  "deal"),
+        ("BU",                   36,  "du"),
+        ("DU",                   34,  "du"),
+        ("Gross (breakdown)",    16,  "finance"),
+        ("Net (breakdown)",      16,  "finance"),
+        ("Total Gross",          15,  "finance"),
+        ("Total Net",            15,  "finance"),
+        ("Stage",                36,  "other"),
+        ("Account Manager",      22,  "other"),
+        ("Sector",               16,  "other"),
+        ("Closure Due Quarter",   9,  "other"),
+        ("Winning Probability",  10,  "other"),
+        ("Forecasted",           10,  "other"),
+        ("Strategic Opportunity",10,  "other"),
+        ("Est. Close Date",      14,  "other"),
+    ]
+    hdr_fmt_map = {"deal": fh_deal, "du": fh_du, "finance": fh_finance, "other": fh_other}
+    ncols = len(bd_output_cols)
+    bw.merge_range(0, 0, 0, ncols - 1, "Pipeline — Expanded by Delivery Unit", fmt_title_bd)
     bw.set_row(0, 28)
+    for c, (col_name, col_w, col_type) in enumerate(bd_output_cols):
+        bw.write(1, c, col_name, hdr_fmt_map[col_type])
+        bw.set_column(c, c, col_w)
+    bw.set_row(1, 28)
     bw.freeze_panes(2, 0)
 
-    bd_cols   = ["Account Name","Opportunity","BU","DU",
-                 "Gross (QAR)","Net (QAR)","Stage","Account Manager",
-                 "Sector","Quarter","Win Prob","Forecasted"]
-    bd_widths = [28, 36, 30, 36, 18, 18, 22, 22, 16, 10, 12, 12]
-    write_header_row(bw, 1, bd_cols, bd_widths)
-    bw.autofilter(1, 0, 1+len(du_exp), len(bd_cols)-1)
+    bd_exp = _expand_deals(df, "Lead/Opp Name")
+    bw.autofilter(1, 0, 1 + len(bd_exp), ncols - 1)
 
-    bd_df = du_exp.sort_values(["BU","DU","Account Name"], ascending=True).reset_index(drop=True)
-    for r, row in bd_df.iterrows():
-        alt = (r % 2 == 1)
-        t_fmt = fmt_alt     if alt else fmt_text
-        n_fmt = fmt_alt_num if alt else fmt_num
-        bw.write(2+r, 0,  str(row["Account Name"])       if pd.notna(row["Account Name"])       else "", t_fmt)
-        bw.write(2+r, 1,  str(row["Lead/Opp Name"])      if pd.notna(row["Lead/Opp Name"])      else "", t_fmt)
-        bw.write(2+r, 2,  str(row["BU"])                 if pd.notna(row["BU"])                 else "", t_fmt)
-        bw.write(2+r, 3,  str(row["DU"])                 if pd.notna(row["DU"])                 else "", t_fmt)
-        bw.write_number(2+r, 4, row["Gross"], n_fmt)
-        bw.write_number(2+r, 5, row["Net"],   n_fmt)
-        bw.write(2+r, 6,  str(row["Stage"])              if pd.notna(row["Stage"])              else "", t_fmt)
-        bw.write(2+r, 7,  str(row["Account Manager"])    if pd.notna(row["Account Manager"])    else "", t_fmt)
-        bw.write(2+r, 8,  str(row["Sector"])             if pd.notna(row["Sector"])             else "", t_fmt)
-        bw.write(2+r, 9,  str(row["Closure Due Quarter"])if pd.notna(row["Closure Due Quarter"])else "", t_fmt)
-        bw.write(2+r, 10, str(row["Winning Probability"])if pd.notna(row["Winning Probability"])else "", t_fmt)
-        bw.write(2+r, 11, str(row["Forecasted"])         if pd.notna(row["Forecasted"])         else "", t_fmt)
+    prev_deal_idx = None
+    alt_toggle = False
+    for _, row in bd_exp.iterrows():
+        didx     = row["_deal_idx"]
+        is_first = bool(row["_is_first"])
+        if didx != prev_deal_idx:
+            alt_toggle = not alt_toggle
+            prev_deal_idx = didx
+        alt  = alt_toggle
+        top  = 2 if is_first else 1
+        bg   = CLR["alt_a"] if alt else CLR["alt_b"]
+        ft   = (ft_a_first if is_first else ft_a_next) if alt else (ft_b_first if is_first else ft_b_next)
+        fn   = (fn_a_first if is_first else fn_a_next) if alt else (fn_b_first if is_first else fn_b_next)
+        fbu  = (fb_a_first if is_first else fb_a_next) if alt else (fb_b_first if is_first else fb_b_next)
+        fdu  = (fd_a_first if is_first else fd_a_next) if alt else (fd_b_first if is_first else fd_b_next)
+        fxn  = (fx_a_first if is_first else fx_a_next) if alt else (fx_b_first if is_first else fx_b_next)
+
+        r_out = _  # xlsxwriter row = 2 + position in iterable
+        # We need a counter — use enumerate approach instead
+        # We'll collect and write below
+        pass
+
+    # Re-iterate with enumerate for row index
+    prev_deal_idx = None
+    alt_toggle = False
+    for r_pos, (_, row) in enumerate(bd_exp.iterrows()):
+        didx     = row["_deal_idx"]
+        is_first = bool(row["_is_first"])
+        if didx != prev_deal_idx:
+            alt_toggle = not alt_toggle
+            prev_deal_idx = didx
+        alt = alt_toggle
+        ft   = (ft_a_first if is_first else ft_a_next) if alt else (ft_b_first if is_first else ft_b_next)
+        fn   = (fn_a_first if is_first else fn_a_next) if alt else (fn_b_first if is_first else fn_b_next)
+        fbu  = (fb_a_first if is_first else fb_a_next) if alt else (fb_b_first if is_first else fb_b_next)
+        fdu  = (fd_a_first if is_first else fd_a_next) if alt else (fd_b_first if is_first else fd_b_next)
+        fxn  = (fx_a_first if is_first else fx_a_next) if alt else (fx_b_first if is_first else fx_b_next)
+        xl_r = 2 + r_pos
+
+        def _ws(col_idx, val, fmt):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                bw.write_blank(xl_r, col_idx, None, fmt)
+            else:
+                bw.write(xl_r, col_idx, str(val), fmt)
+
+        def _wn(col_idx, val, fmt):
+            v = _parse_num(val) if not isinstance(val, (int, float)) else val
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                bw.write_blank(xl_r, col_idx, None, fmt)
+            else:
+                bw.write_number(xl_r, col_idx, v, fmt)
+
+        col_map = {name: idx for idx, (name, _, __) in enumerate(bd_output_cols)}
+
+        # Deal-level cols (first row only)
+        _ws(col_map["SNo."],                 row.get("SNo.")                  if is_first else None, ft)
+        _ws(col_map["Account Name"],          row.get("Account Name")          if is_first else None, ft)
+        _ws(col_map["Lead/Opp Name"],         row.get("Lead/Opp Name")         if is_first else None, ft)
+        # BU / DU (always)
+        _ws(col_map["BU"],  row.get("BU_exp"),  fbu)
+        _ws(col_map["DU"],  row.get("DU_exp"),  fdu)
+        # Breakdown numbers (always)
+        _wn(col_map["Gross (breakdown)"],     row.get("Gross_exp"), fxn)
+        _wn(col_map["Net (breakdown)"],       row.get("Net_exp"),   fxn)
+        # Total Gross / Net (first row only)
+        if is_first:
+            _wn(col_map["Total Gross"], row.get("Total Gross"), ft_tot)
+            _wn(col_map["Total Net"],   row.get("Total Net"),   ft_tot)
+        else:
+            bw.write_blank(xl_r, col_map["Total Gross"], None, ft_tot_blank)
+            bw.write_blank(xl_r, col_map["Total Net"],   None, ft_tot_blank)
+        # Other deal-level cols
+        _ws(col_map["Stage"],                 row.get("Stage")                 if is_first else None, ft)
+        _ws(col_map["Account Manager"],       row.get("Account Manager")       if is_first else None, ft)
+        _ws(col_map["Sector"],                row.get("Sector")                if is_first else None, ft)
+        _ws(col_map["Closure Due Quarter"],   row.get("Closure Due Quarter")   if is_first else None, ft)
+        _ws(col_map["Winning Probability"],   row.get("Winning Probability")   if is_first else None, ft)
+        _ws(col_map["Forecasted"],            row.get("Forecasted")            if is_first else None, ft)
+        _ws(col_map["Strategic Opportunity"], row.get("Strategic Opportunity") if is_first else None, ft)
+        # Est. Close Date (date format, first row only)
+        cd_idx = col_map["Est. Close Date"]
+        if is_first:
+            cd_val = row.get("Est. Close Date")
+            if pd.notna(cd_val):
+                try:
+                    bw.write_datetime(xl_r, cd_idx, pd.Timestamp(cd_val).to_pydatetime(), ft_date)
+                except Exception:
+                    bw.write(xl_r, cd_idx, str(cd_val), ft_date)
+            else:
+                bw.write_blank(xl_r, cd_idx, None, ft_date)
+        else:
+            bw.write_blank(xl_r, cd_idx, None, ft_date_blank)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 9 — BOOK3 MAPPING

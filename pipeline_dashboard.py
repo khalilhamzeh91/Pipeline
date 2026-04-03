@@ -210,6 +210,48 @@ def du_to_bu(du_str, mapping):
     m = re.match(r"(\d{6})", str(du_str).strip())
     return mapping.get(m.group(1), "Unknown") if m else "Unknown"
 
+def _split_field(value):
+    if pd.isna(value) or str(value).strip() in ("", "nan"):
+        return []
+    return [x.strip() for x in str(value).replace(", \n", "\n").replace(",\n", "\n").split("\n") if x.strip()]
+
+def _parse_num(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except Exception:
+        return None
+
+def _expand_deals(df_in, opp_col=None, mapping=None):  # noqa: ARG001
+    rows = []
+    for deal_idx, row in df_in.iterrows():
+        du_parts = _split_field(row.get("DU", ""))
+        gr_parts = _split_field(row.get("Gross (breakdown)", ""))
+        nt_parts = _split_field(row.get("Net (breakdown)", ""))
+        if not du_parts:
+            du_parts = [str(row.get("DU", ""))]
+        n = len(du_parts)
+        def av(parts, n):
+            if len(parts) == n:
+                return parts
+            if len(parts) <= 1:
+                return (parts or [None]) + [None] * (n - 1)
+            return [parts[0]] + [None] * (n - 1)
+        gr = av(gr_parts, n)
+        nt = av(nt_parts, n)
+        for i, du in enumerate(du_parts):
+            nr = {c: row.get(c) for c in df_in.columns}
+            nr["BU_exp"]    = du_to_bu(du, mapping) if mapping is not None else str(du)
+            nr["DU_exp"]    = du
+            nr["Gross_exp"] = _parse_num(gr[i])
+            nr["Net_exp"]   = _parse_num(nt[i])
+            nr["_is_first"] = (i == 0)
+            nr["_du_count"] = n
+            nr["_deal_idx"] = deal_idx
+            rows.append(nr)
+    return pd.DataFrame(rows)
+
 @st.cache_data
 def load_data(file):
     df = pd.read_excel(file)
@@ -414,7 +456,6 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
         writer.sheets["Summary"] = ws
         ws.merge_range("A1:C1", f"Weekly Pipeline Summary — {TODAY.strftime('%d %B %Y')}", F["title"]); ws.set_row(0,28)
         _hdr(ws, 2, ["Metric","Value"], [34,22], F["header"])
-        qar_set = {"Total Gross Pipeline (QAR)","Total Net Pipeline (QAR)","Forecasted Gross (QAR)","Forecasted Net (QAR)"}
         for i, row in kpi_df.iterrows():
             ws.write(3+i, 0, row["Metric"], F["kpi_lbl"]); ws.write_number(3+i, 1, row["Value"], F["kpi_val"])
         ws.merge_range("D1:H1", "Pipeline by Stage", F["title"])
@@ -566,26 +607,97 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
                 pw.write_blank(2+i,14,None,fd_)
             pw.write(2+i,15,str(row["Source of Opportunity"]) if pd.notna(row["Source of Opportunity"]) else "",ft); pw.write(2+i,16,"YES" if is_ov else "",ft)
 
-        # SHEET 9 — PIPELINE BREAKDOWN
+        # SHEET 9 — PIPELINE BREAKDOWN (styled, one row per DU per opportunity)
+        _CLR = {
+            "title_bg":"1F3864","hdr_deal":"1F3864","hdr_du":"17375E",
+            "hdr_finance":"1F4E79","hdr_other":"2E5FA3",
+            "bu_fill":"EDF2F9","du_fill":"E4ECF7","num_fill":"EBF5FB",
+            "tot_fill":"D5E8F5","date_fill":"FFF2CC",
+            "alt_a":"F5F8FF","alt_b":"FFFFFF",
+        }
+        def _bdf(bg, top, num_fmt=None):
+            d={"bg_color":"#"+bg,"top":top,"bottom":1,"left":1,"right":1,"font_size":9}
+            if num_fmt: d["num_format"]=num_fmt; d["align"]="right"
+            return wb.add_format(d)
+        bd_fh_deal    = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_CLR["hdr_deal"],   "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        bd_fh_du      = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_CLR["hdr_du"],     "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        bd_fh_finance = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_CLR["hdr_finance"],"border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        bd_fh_other   = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_CLR["hdr_other"],  "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        bd_fmt_title  = wb.add_format({"bold":True,"font_size":13,"font_color":"#FFFFFF","bg_color":"#"+_CLR["title_bg"],"align":"center","valign":"vcenter"})
+        bd_ft_a1=_bdf(_CLR["alt_a"],2);  bd_ft_an=_bdf(_CLR["alt_a"],1)
+        bd_ft_b1=_bdf(_CLR["alt_b"],2);  bd_ft_bn=_bdf(_CLR["alt_b"],1)
+        bd_fn_a1=_bdf(_CLR["alt_a"],2,"#,##0"); bd_fn_an=_bdf(_CLR["alt_a"],1,"#,##0")
+        bd_fn_b1=_bdf(_CLR["alt_b"],2,"#,##0"); bd_fn_bn=_bdf(_CLR["alt_b"],1,"#,##0")
+        bd_fbu1=_bdf(_CLR["bu_fill"],2); bd_fbun=_bdf(_CLR["bu_fill"],1)
+        bd_fdu1=_bdf(_CLR["du_fill"],2); bd_fdun=_bdf(_CLR["du_fill"],1)
+        bd_fxn1=_bdf(_CLR["num_fill"],2,"#,##0"); bd_fxnn=_bdf(_CLR["num_fill"],1,"#,##0")
+        bd_ftot  =wb.add_format({"bg_color":"#"+_CLR["tot_fill"],"num_format":"#,##0","border":1,"align":"right","bold":True,"font_size":9})
+        bd_ftotbl=wb.add_format({"bg_color":"#"+_CLR["num_fill"],"border":1,"font_size":9})
+        bd_fdate =wb.add_format({"bg_color":"#"+_CLR["date_fill"],"border":1,"align":"center","num_format":"DD-MMM-YYYY","font_size":9})
+        bd_fdatebl=wb.add_format({"bg_color":"#"+_CLR["alt_a"],"border":1,"font_size":9})
+
         bw = wb.add_worksheet("Pipeline Breakdown"); bw.set_zoom(85); bw.set_tab_color("#9370DB")
         writer.sheets["Pipeline Breakdown"] = bw
-        bw.merge_range("A1:L1","Pipeline Breakdown — One Row per BU / DU per Opportunity",F["title"]); bw.set_row(0,28); bw.freeze_panes(2,0)
-        _hdr(bw,1,["Account Name","Opportunity","BU","DU","Gross (QAR)","Net (QAR)","Stage","Account Manager","Sector","Quarter","Win Prob","Forecasted"],[28,36,30,36,18,18,22,22,16,10,12,12],F["header"])
-        bd_df = du_exp.sort_values(["BU","DU","Account Name"]).reset_index(drop=True)
-        bw.autofilter(1,0,1+len(bd_df),11)
-        for i, row in bd_df.iterrows():
-            alt=i%2==1; ft=F["alt"] if alt else F["text"]; fn=F["alt_num"] if alt else F["num"]
-            bw.write(2+i,0,str(row["Account Name"]) if pd.notna(row["Account Name"]) else "",ft)
-            bw.write(2+i,1,str(row["Lead/Opp Name"]) if pd.notna(row["Lead/Opp Name"]) else "",ft)
-            bw.write(2+i,2,str(row["BU"]) if pd.notna(row["BU"]) else "",ft)
-            bw.write(2+i,3,str(row["DU"]) if pd.notna(row["DU"]) else "",ft)
-            bw.write_number(2+i,4,row["Gross"],fn); bw.write_number(2+i,5,row["Net"],fn)
-            bw.write(2+i,6,str(row["Stage"]) if pd.notna(row["Stage"]) else "",ft)
-            bw.write(2+i,7,str(row["Account Manager"]) if pd.notna(row["Account Manager"]) else "",ft)
-            bw.write(2+i,8,str(row["Sector"]) if pd.notna(row["Sector"]) else "",ft)
-            bw.write(2+i,9,str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "",ft)
-            bw.write(2+i,10,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",ft)
-            bw.write(2+i,11,str(row["Forecasted"]) if pd.notna(row["Forecasted"]) else "",ft)
+        bd_ocols = [
+            ("SNo.",6,"deal"),("Account Name",24,"deal"),("Lead/Opp Name",36,"deal"),
+            ("BU",36,"du"),("DU",34,"du"),
+            ("Gross (breakdown)",16,"finance"),("Net (breakdown)",16,"finance"),
+            ("Total Gross",15,"finance"),("Total Net",15,"finance"),
+            ("Stage",36,"other"),("Account Manager",22,"other"),("Sector",16,"other"),
+            ("Closure Due Quarter",9,"other"),("Winning Probability",10,"other"),
+            ("Forecasted",10,"other"),("Strategic Opportunity",10,"other"),
+            ("Est. Close Date",14,"other"),
+        ]
+        bd_hfmt={"deal":bd_fh_deal,"du":bd_fh_du,"finance":bd_fh_finance,"other":bd_fh_other}
+        bd_nc=len(bd_ocols)
+        bw.merge_range(0,0,0,bd_nc-1,"Pipeline — Expanded by Delivery Unit",bd_fmt_title); bw.set_row(0,28)
+        for c,(cn,cw,ct) in enumerate(bd_ocols): bw.write(1,c,cn,bd_hfmt[ct]); bw.set_column(c,c,cw)
+        bw.set_row(1,28); bw.freeze_panes(2,0)
+        bd_exp = _expand_deals(df, mapping=mapping)
+        bw.autofilter(1,0,1+len(bd_exp),bd_nc-1)
+        bd_cmap={cn:idx for idx,(cn,_,__) in enumerate(bd_ocols)}
+        bd_prev=None; bd_alt=False
+        for rp,(_, row) in enumerate(bd_exp.iterrows()):
+            didx=row["_deal_idx"]; isf=bool(row["_is_first"])
+            if didx!=bd_prev: bd_alt=not bd_alt; bd_prev=didx
+            ft=(bd_ft_a1 if isf else bd_ft_an) if bd_alt else (bd_ft_b1 if isf else bd_ft_bn)
+            fn=(bd_fn_a1 if isf else bd_fn_an) if bd_alt else (bd_fn_b1 if isf else bd_fn_bn)
+            fbu=bd_fbu1 if isf else bd_fbun; fdu=bd_fdu1 if isf else bd_fdun
+            fxn=bd_fxn1 if isf else bd_fxnn; xl_r=2+rp
+            def _bws(ci,val,fmt):
+                if val is None or (isinstance(val,float) and pd.isna(val)): bw.write_blank(xl_r,ci,None,fmt)
+                else: bw.write(xl_r,ci,str(val),fmt)
+            def _bwn(ci,val,fmt):
+                v=_parse_num(val) if not isinstance(val,(int,float)) else val
+                if v is None or (isinstance(v,float) and pd.isna(v)): bw.write_blank(xl_r,ci,None,fmt)
+                else: bw.write_number(xl_r,ci,v,fmt)
+            _bws(bd_cmap["SNo."],              row.get("SNo.")               if isf else None,ft)
+            _bws(bd_cmap["Account Name"],       row.get("Account Name")       if isf else None,ft)
+            _bws(bd_cmap["Lead/Opp Name"],      row.get("Lead/Opp Name")      if isf else None,ft)
+            _bws(bd_cmap["BU"],row.get("BU_exp"),fbu); _bws(bd_cmap["DU"],row.get("DU_exp"),fdu)
+            _bwn(bd_cmap["Gross (breakdown)"],  row.get("Gross_exp"),fxn)
+            _bwn(bd_cmap["Net (breakdown)"],    row.get("Net_exp"),  fxn)
+            if isf:
+                _bwn(bd_cmap["Total Gross"],row.get("Total Gross"),bd_ftot)
+                _bwn(bd_cmap["Total Net"],  row.get("Total Net"),  bd_ftot)
+            else:
+                bw.write_blank(xl_r,bd_cmap["Total Gross"],None,bd_ftotbl)
+                bw.write_blank(xl_r,bd_cmap["Total Net"],  None,bd_ftotbl)
+            _bws(bd_cmap["Stage"],              row.get("Stage")              if isf else None,ft)
+            _bws(bd_cmap["Account Manager"],    row.get("Account Manager")    if isf else None,ft)
+            _bws(bd_cmap["Sector"],             row.get("Sector")             if isf else None,ft)
+            _bws(bd_cmap["Closure Due Quarter"],row.get("Closure Due Quarter")if isf else None,ft)
+            _bws(bd_cmap["Winning Probability"],row.get("Winning Probability")if isf else None,ft)
+            _bws(bd_cmap["Forecasted"],         row.get("Forecasted")         if isf else None,ft)
+            _bws(bd_cmap["Strategic Opportunity"],row.get("Strategic Opportunity") if isf else None,ft)
+            cd_i=bd_cmap["Est. Close Date"]
+            if isf:
+                cd_v=row.get("Est. Close Date")
+                if pd.notna(cd_v):
+                    try: bw.write_datetime(xl_r,cd_i,pd.Timestamp(cd_v).to_pydatetime(),bd_fdate)
+                    except Exception: bw.write(xl_r,cd_i,str(cd_v),bd_fdate)
+                else: bw.write_blank(xl_r,cd_i,None,bd_fdate)
+            else: bw.write_blank(xl_r,cd_i,None,bd_fdatebl)
 
         # SHEET 10 — BOOK3 MAPPING (only if Book3 uploaded)
         if book3_file is not None:
@@ -797,6 +909,83 @@ def export_awarded_excel(file26, file25):
                     fd_ws.write_number(2+i,c,val if pd.notna(val) else 0,fn)
                 else:
                     fd_ws.write(2+i,c,str(val) if pd.notna(val) else "",ft)
+
+        # SHEET 6 — AWARDED BREAKDOWN (styled, one row per DU per opportunity)
+        _ACLR = {
+            "title_bg":"1F3864","hdr_deal":"1F3864","hdr_du":"17375E",
+            "hdr_finance":"1F4E79","hdr_other":"2E5FA3",
+            "bu_fill":"EDF2F9","du_fill":"E4ECF7","num_fill":"EBF5FB",
+            "tot_fill":"D5E8F5","alt_a":"F5F8FF","alt_b":"FFFFFF",
+        }
+        def _awf(bg,top,num_fmt=None):
+            d={"bg_color":"#"+bg,"top":top,"bottom":1,"left":1,"right":1,"font_size":9}
+            if num_fmt: d["num_format"]=num_fmt; d["align"]="right"
+            return wb.add_format(d)
+        aw_fh_deal    = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_ACLR["hdr_deal"],   "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        aw_fh_du      = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_ACLR["hdr_du"],     "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        aw_fh_finance = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_ACLR["hdr_finance"],"border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        aw_fh_other   = wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#"+_ACLR["hdr_other"],  "border":1,"align":"center","valign":"vcenter","text_wrap":True,"font_size":9})
+        aw_fmt_title  = wb.add_format({"bold":True,"font_size":13,"font_color":"#FFFFFF","bg_color":"#"+_ACLR["title_bg"],"align":"center","valign":"vcenter"})
+        aw_ft_a1=_awf(_ACLR["alt_a"],2);  aw_ft_an=_awf(_ACLR["alt_a"],1)
+        aw_ft_b1=_awf(_ACLR["alt_b"],2);  aw_ft_bn=_awf(_ACLR["alt_b"],1)
+        aw_fn_a1=_awf(_ACLR["alt_a"],2,"#,##0"); aw_fn_an=_awf(_ACLR["alt_a"],1,"#,##0")
+        aw_fn_b1=_awf(_ACLR["alt_b"],2,"#,##0"); aw_fn_bn=_awf(_ACLR["alt_b"],1,"#,##0")
+        aw_fbu1=_awf(_ACLR["bu_fill"],2); aw_fbun=_awf(_ACLR["bu_fill"],1)
+        aw_fdu1=_awf(_ACLR["du_fill"],2); aw_fdun=_awf(_ACLR["du_fill"],1)
+        aw_fxn1=_awf(_ACLR["num_fill"],2,"#,##0"); aw_fxnn=_awf(_ACLR["num_fill"],1,"#,##0")
+        aw_ftot  =wb.add_format({"bg_color":"#"+_ACLR["tot_fill"],"num_format":"#,##0","border":1,"align":"right","bold":True,"font_size":9})
+        aw_ftotbl=wb.add_format({"bg_color":"#"+_ACLR["num_fill"],"border":1,"font_size":9})
+        aw_oc=[
+            ("SNo.",6,"deal"),("Account Name",24,"deal"),("Opportunity Name",36,"deal"),
+            ("BU",36,"du"),("DU",34,"du"),
+            ("Gross (breakdown)",16,"finance"),("Net (breakdown)",16,"finance"),
+            ("Total Gross",15,"finance"),("Total Net",15,"finance"),
+            ("Stage",28,"other"),("Account Manager",22,"other"),
+            ("Award Quarter",10,"other"),("Contracted",10,"other"),("Year",8,"other"),
+        ]
+        aw_hfmt={"deal":aw_fh_deal,"du":aw_fh_du,"finance":aw_fh_finance,"other":aw_fh_other}
+        aw_nc=len(aw_oc)
+        aw_bw=wb.add_worksheet("Awarded Breakdown"); aw_bw.set_zoom(85); aw_bw.set_tab_color("#9370DB")
+        writer.sheets["Awarded Breakdown"]=aw_bw
+        aw_bw.merge_range(0,0,0,aw_nc-1,"Awarded Deals — Expanded by Delivery Unit",aw_fmt_title); aw_bw.set_row(0,28)
+        for c,(cn,cw,ct) in enumerate(aw_oc): aw_bw.write(1,c,cn,aw_hfmt[ct]); aw_bw.set_column(c,c,cw)
+        aw_bw.set_row(1,28); aw_bw.freeze_panes(2,0)
+        aw_coa=load_coa()
+        aw_exp=_expand_deals(df,mapping=aw_coa)
+        aw_bw.autofilter(1,0,1+len(aw_exp),aw_nc-1)
+        aw_cm={cn:idx for idx,(cn,_,__) in enumerate(aw_oc)}
+        aw_prev=None; aw_alt=False
+        for rp,(_, row) in enumerate(aw_exp.iterrows()):
+            didx=row["_deal_idx"]; isf=bool(row["_is_first"])
+            if didx!=aw_prev: aw_alt=not aw_alt; aw_prev=didx
+            ft=(aw_ft_a1 if isf else aw_ft_an) if aw_alt else (aw_ft_b1 if isf else aw_ft_bn)
+            fn=(aw_fn_a1 if isf else aw_fn_an) if aw_alt else (aw_fn_b1 if isf else aw_fn_bn)
+            fbu=aw_fbu1 if isf else aw_fbun; fdu=aw_fdu1 if isf else aw_fdun
+            fxn=aw_fxn1 if isf else aw_fxnn; xl_r=2+rp
+            def _aws(ci,val,fmt):
+                if val is None or (isinstance(val,float) and pd.isna(val)): aw_bw.write_blank(xl_r,ci,None,fmt)
+                else: aw_bw.write(xl_r,ci,str(val),fmt)
+            def _awn(ci,val,fmt):
+                v=_parse_num(val) if not isinstance(val,(int,float)) else val
+                if v is None or (isinstance(v,float) and pd.isna(v)): aw_bw.write_blank(xl_r,ci,None,fmt)
+                else: aw_bw.write_number(xl_r,ci,v,fmt)
+            _aws(aw_cm["SNo."],             row.get("SNo.")             if isf else None,ft)
+            _aws(aw_cm["Account Name"],      row.get("Account Name")     if isf else None,ft)
+            _aws(aw_cm["Opportunity Name"],  row.get("Opportunity Name") if isf else None,ft)
+            _aws(aw_cm["BU"],row.get("BU_exp"),fbu); _aws(aw_cm["DU"],row.get("DU_exp"),fdu)
+            _awn(aw_cm["Gross (breakdown)"], row.get("Gross_exp"),fxn)
+            _awn(aw_cm["Net (breakdown)"],   row.get("Net_exp"),  fxn)
+            if isf:
+                _awn(aw_cm["Total Gross"],row.get("Total Gross"),aw_ftot)
+                _awn(aw_cm["Total Net"],  row.get("Total Net"),  aw_ftot)
+            else:
+                aw_bw.write_blank(xl_r,aw_cm["Total Gross"],None,aw_ftotbl)
+                aw_bw.write_blank(xl_r,aw_cm["Total Net"],  None,aw_ftotbl)
+            _aws(aw_cm["Stage"],        row.get("Stage")         if isf else None,ft)
+            _aws(aw_cm["Account Manager"],row.get("Account Manager") if isf else None,ft)
+            _aws(aw_cm["Award Quarter"],row.get("Award Quarter") if isf else None,ft)
+            _aws(aw_cm["Contracted"],   row.get("Contracted")    if isf else None,ft)
+            _aws(aw_cm["Year"],         row.get("Year")          if isf else None,ft)
 
     output.seek(0)
     return output.read()

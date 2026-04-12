@@ -72,21 +72,32 @@ def _expand_deals(df_in, opp_col=None):  # noqa: ARG001
 
 # ── LOAD & CLEAN ──────────────────────────────────────────────────────────────
 def load_awarded(path, year_label):
-    df = pd.read_excel(path, sheet_name="Export")
+    xl = pd.ExcelFile(path)
+    sheet = "Export" if "Export" in xl.sheet_names else xl.sheet_names[0]
+    df = pd.read_excel(path, sheet_name=sheet)
     df.columns = df.columns.str.strip()
     df = df.dropna(subset=["Stage"])
-    df["Year"]           = year_label
-    df["Total Gross"]    = pd.to_numeric(df["Total Gross"],   errors="coerce").fillna(0)
-    df["Total Net"]      = pd.to_numeric(df["Total Net"],     errors="coerce").fillna(0)
-    df["Project Value"]  = pd.to_numeric(df["Project value (as per the contract value)"], errors="coerce").fillna(0)
-    df["Client Commitment"] = pd.to_numeric(df["Client Commitment/WOs Net"], errors="coerce").fillna(0)
+    df["Year"]        = year_label
+    df["Total Gross"] = pd.to_numeric(df["Total Gross"],  errors="coerce").fillna(0)
+    df["Total Net"]   = pd.to_numeric(df["Total Net"],    errors="coerce").fillna(0)
+    # Project Value — column name differs between files
+    pv_col = next((c for c in df.columns if "project value" in c.lower() or "contract value" in c.lower()), None)
+    df["Project Value"] = pd.to_numeric(df[pv_col], errors="coerce").fillna(0) if pv_col else 0
+    cc_col = next((c for c in df.columns if "client commitment" in c.lower()), None)
+    df["Client Commitment"] = pd.to_numeric(df[cc_col], errors="coerce").fillna(0) if cc_col else 0
     def simplify_nr(val):
         if pd.isna(val): return "Unknown"
         vals = set(v.strip() for v in str(val).split("\n"))
         if vals == {"New"}:   return "New"
         if vals == {"Renew"}: return "Renew"
         return "Mixed"
-    df["Type"] = df["New/Renew"].apply(simplify_nr)
+    nr_col = next((c for c in df.columns if "new" in c.lower() and "renew" in c.lower()), None)
+    df["Type"] = df[nr_col].apply(simplify_nr) if nr_col else "Unknown"
+    # Map Opportunity Name / Lead/Opp Name variations
+    if "Opportunity Name" not in df.columns and "Lead/Opp Name" in df.columns:
+        df["Opportunity Name"] = df["Lead/Opp Name"]
+    elif "Lead/Opp Name" not in df.columns and "Opportunity Name" in df.columns:
+        df["Lead/Opp Name"] = df["Opportunity Name"]
     return df
 
 import os
@@ -333,13 +344,14 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         ws.write_number(3+i, 5, row["Gross"], f_num)
         ws.write_number(3+i, 6, row["Net"],   f_num)
         ws.write_number(3+i, 7, row["PV"],    f_num)
-    # Totals row
+    # Totals row — formula-based
+    _yr_r1 = 4; _yr_rN = 3 + len(year_df)
     tr = 3 + len(year_df)
     ws.write(tr, 3, "TOTAL", fmt_tot_lbl)
-    ws.write_number(tr, 4, year_df["Count"].sum(), fmt_tot_num)
-    ws.write_number(tr, 5, year_df["Gross"].sum(), fmt_tot_num)
-    ws.write_number(tr, 6, year_df["Net"].sum(),   fmt_tot_num)
-    ws.write_number(tr, 7, year_df["PV"].sum(),    fmt_tot_num)
+    ws.write_formula(tr, 4, f"=SUM(E{_yr_r1}:E{_yr_rN})", fmt_tot_num)
+    ws.write_formula(tr, 5, f"=SUM(F{_yr_r1}:F{_yr_rN})", fmt_tot_num)
+    ws.write_formula(tr, 6, f"=SUM(G{_yr_r1}:G{_yr_rN})", fmt_tot_num)
+    ws.write_formula(tr, 7, f"=SUM(H{_yr_r1}:H{_yr_rN})", fmt_tot_num)
 
     # Stage table
     off_s = len(kpi_df) + 5
@@ -372,47 +384,76 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         du_ws.write(1, c, col, fmt_header)
         du_ws.set_column(c, c, du_widths[c])
 
-    r_out = 0
+    # Pre-compute layout for formula-based subtotals
+    _adu_layout = []  # [(bu_name, bu_r0, [(du_row, du_r0, [opp_r0, ...])])]
+    _adu_pos = 0
     for bu_name, bu_grp in du_totals.groupby("BU"):
-        # BU subtotal row
-        du_ws.write(2+r_out, 0, bu_name, fmt_bu_lbl)
-        du_ws.write(2+r_out, 1, "", fmt_bu_lbl)
-        du_ws.write_number(2+r_out, 2, bu_grp["Gross"].sum(),         fmt_bu_num)
-        du_ws.write_number(2+r_out, 3, bu_grp["Net"].sum(),           fmt_bu_num)
-        du_ws.write_number(2+r_out, 4, bu_grp.get("2025",pd.Series([0])).sum(), fmt_bu_num)
-        du_ws.write_number(2+r_out, 5, bu_grp.get("2026",pd.Series([0])).sum(), fmt_bu_num)
-        r_out += 1
-        for _, row in bu_grp.iterrows():
-            alt = (r_out % 2 == 1)
-            du_ws.write(2+r_out, 0, "", fmt_alt if alt else fmt_text)
-            du_ws.write(2+r_out, 1, row["DU"], fmt_alt if alt else fmt_text)
-            du_ws.write_number(2+r_out, 2, row["Gross"], fmt_alt_num if alt else fmt_num)
-            du_ws.write_number(2+r_out, 3, row["Net"],   fmt_alt_num if alt else fmt_num)
-            du_ws.write_number(2+r_out, 4, row.get("2025", 0), fmt_alt_num if alt else fmt_num)
-            du_ws.write_number(2+r_out, 5, row.get("2026", 0), fmt_alt_num if alt else fmt_num)
-            r_out += 1
-            # Opportunity sub-rows for this DU
-            du_deals = du_exp[du_exp["DU"] == row["DU"]].copy()
-            for _, deal in du_deals.iterrows():
+        bu_r0 = 2 + _adu_pos; _adu_pos += 1
+        du_list = []
+        for _, drow in bu_grp.iterrows():
+            du_r0 = 2 + _adu_pos; _adu_pos += 1
+            du_deals = du_exp[du_exp["DU"] == drow["DU"]].copy()
+            opp_rows = []
+            for _ in du_deals.itertuples():
+                opp_rows.append(2 + _adu_pos); _adu_pos += 1
+            du_list.append((drow, du_r0, opp_rows))
+        _adu_layout.append((bu_name, bu_r0, bu_grp, du_list))
+    _adu_grand_r = 2 + _adu_pos
+
+    _adu_bu_rows = []
+    for bu_name, bu_r0, bu_grp, du_list in _adu_layout:
+        _du_r1s = [dr0+1 for (_, dr0, _) in du_list]
+        _bu_C = "+".join("C" + str(r) for r in _du_r1s)
+        _bu_D = "+".join("D" + str(r) for r in _du_r1s)
+        _bu_E = "+".join("E" + str(r) for r in _du_r1s)
+        _bu_F = "+".join("F" + str(r) for r in _du_r1s)
+        du_ws.write(bu_r0, 0, bu_name, fmt_bu_lbl)
+        du_ws.write(bu_r0, 1, "", fmt_bu_lbl)
+        du_ws.write_formula(bu_r0, 2, "=" + _bu_C, fmt_bu_num)
+        du_ws.write_formula(bu_r0, 3, "=" + _bu_D, fmt_bu_num)
+        du_ws.write_formula(bu_r0, 4, "=" + _bu_E, fmt_bu_num)
+        du_ws.write_formula(bu_r0, 5, "=" + _bu_F, fmt_bu_num)
+        _adu_bu_rows.append(bu_r0 + 1)
+
+        for drow, du_r0, opp_rows in du_list:
+            alt = (du_r0 % 2 == 1)
+            if opp_rows:
+                _r1 = min(opp_rows) + 1; _rN = max(opp_rows) + 1
+                _opp_C = f"=SUM(C{_r1}:C{_rN})"; _opp_D = f"=SUM(D{_r1}:D{_rN})"
+                _opp_E = f"=SUM(E{_r1}:E{_rN})"; _opp_F = f"=SUM(F{_r1}:F{_rN})"
+            else:
+                _opp_C = "=0"; _opp_D = "=0"; _opp_E = "=0"; _opp_F = "=0"
+            du_ws.write(du_r0, 0, "", fmt_alt if alt else fmt_text)
+            du_ws.write(du_r0, 1, drow["DU"], fmt_alt if alt else fmt_text)
+            du_ws.write_formula(du_r0, 2, _opp_C, fmt_alt_num if alt else fmt_num)
+            du_ws.write_formula(du_r0, 3, _opp_D, fmt_alt_num if alt else fmt_num)
+            du_ws.write_formula(du_r0, 4, _opp_E, fmt_alt_num if alt else fmt_num)
+            du_ws.write_formula(du_r0, 5, _opp_F, fmt_alt_num if alt else fmt_num)
+
+            du_deals = du_exp[du_exp["DU"] == drow["DU"]].copy()
+            for opp_r0, (_, deal) in zip(opp_rows, du_deals.iterrows()):
                 opp_label = f"  ↳  {deal['Opportunity']}"
-                du_ws.write(2+r_out, 0, "", fmt_opp)
-                du_ws.write(2+r_out, 1, opp_label, fmt_opp)
-                du_ws.write_number(2+r_out, 2, deal["Gross"], fmt_opp_num)
-                du_ws.write_number(2+r_out, 3, deal["Net"],   fmt_opp_num)
                 net_25 = deal["Net"] if str(deal.get("Year","")) == "2025" else 0
                 net_26 = deal["Net"] if str(deal.get("Year","")) == "2026" else 0
-                du_ws.write_number(2+r_out, 4, net_25, fmt_opp_num)
-                du_ws.write_number(2+r_out, 5, net_26, fmt_opp_num)
-                r_out += 1
+                du_ws.write(opp_r0, 0, "", fmt_opp)
+                du_ws.write(opp_r0, 1, opp_label, fmt_opp)
+                du_ws.write_number(opp_r0, 2, deal["Gross"], fmt_opp_num)
+                du_ws.write_number(opp_r0, 3, deal["Net"],   fmt_opp_num)
+                du_ws.write_number(opp_r0, 4, net_25, fmt_opp_num)
+                du_ws.write_number(opp_r0, 5, net_26, fmt_opp_num)
 
-    # Grand total
-    t = 2 + r_out
+    # Grand Total — SUM of all BU rows
+    _gt_C = "+".join("C" + str(r) for r in _adu_bu_rows)
+    _gt_D = "+".join("D" + str(r) for r in _adu_bu_rows)
+    _gt_E = "+".join("E" + str(r) for r in _adu_bu_rows)
+    _gt_F = "+".join("F" + str(r) for r in _adu_bu_rows)
+    t = _adu_grand_r
     du_ws.write(t, 0, "GRAND TOTAL", fmt_tot_lbl)
     du_ws.write(t, 1, "", fmt_tot_lbl)
-    du_ws.write_number(t, 2, du_totals["Gross"].sum(), fmt_tot_num)
-    du_ws.write_number(t, 3, du_totals["Net"].sum(),   fmt_tot_num)
-    du_ws.write_number(t, 4, du_totals["2025"].sum() if "2025" in du_totals.columns else 0, fmt_tot_num)
-    du_ws.write_number(t, 5, du_totals["2026"].sum() if "2026" in du_totals.columns else 0, fmt_tot_num)
+    du_ws.write_formula(t, 2, "=" + _gt_C, fmt_tot_num)
+    du_ws.write_formula(t, 3, "=" + _gt_D, fmt_tot_num)
+    du_ws.write_formula(t, 4, "=" + _gt_E, fmt_tot_num)
+    du_ws.write_formula(t, 5, "=" + _gt_F, fmt_tot_num)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 3 — ACCOUNT MANAGER
@@ -438,14 +479,15 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         am_ws.write_number(2+i, 4, row["Net 2025"],   fmt_alt_num if alt else fmt_num)
         am_ws.write_number(2+i, 5, row["Net 2026"],   fmt_alt_num if alt else fmt_num)
 
-    # Totals
+    # Totals — formula-based
+    _am_r1 = 3; _am_rN = 2 + len(am_df)
     tr = 2 + len(am_df)
     am_ws.write(tr, 0, "GRAND TOTAL", fmt_tot_lbl)
-    am_ws.write_number(tr, 1, am_df["Count"].sum(),    fmt_tot_num)
-    am_ws.write_number(tr, 2, am_df["Gross"].sum(),    fmt_tot_num)
-    am_ws.write_number(tr, 3, am_df["Net"].sum(),      fmt_tot_num)
-    am_ws.write_number(tr, 4, am_df["Net 2025"].sum(), fmt_tot_num)
-    am_ws.write_number(tr, 5, am_df["Net 2026"].sum(), fmt_tot_num)
+    am_ws.write_formula(tr, 1, f"=SUM(B{_am_r1}:B{_am_rN})", fmt_tot_num)
+    am_ws.write_formula(tr, 2, f"=SUM(C{_am_r1}:C{_am_rN})", fmt_tot_num)
+    am_ws.write_formula(tr, 3, f"=SUM(D{_am_r1}:D{_am_rN})", fmt_tot_num)
+    am_ws.write_formula(tr, 4, f"=SUM(E{_am_r1}:E{_am_rN})", fmt_tot_num)
+    am_ws.write_formula(tr, 5, f"=SUM(F{_am_r1}:F{_am_rN})", fmt_tot_num)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 4 — AWARD QUARTER
@@ -471,12 +513,13 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         aq_ws.write_number(2+i, 3, row["Gross"], f_num)
         aq_ws.write_number(2+i, 4, row["Net"],   f_num)
 
+    _aq_r1 = 3; _aq_rN = 2 + len(q_df)
     tr = 2 + len(q_df)
     aq_ws.write(tr, 0, "GRAND TOTAL", fmt_tot_lbl)
     aq_ws.write(tr, 1, "", fmt_tot_lbl)
-    aq_ws.write_number(tr, 2, q_df["Count"].sum(), fmt_tot_num)
-    aq_ws.write_number(tr, 3, q_df["Gross"].sum(), fmt_tot_num)
-    aq_ws.write_number(tr, 4, q_df["Net"].sum(),   fmt_tot_num)
+    aq_ws.write_formula(tr, 2, f"=SUM(C{_aq_r1}:C{_aq_rN})", fmt_tot_num)
+    aq_ws.write_formula(tr, 3, f"=SUM(D{_aq_r1}:D{_aq_rN})", fmt_tot_num)
+    aq_ws.write_formula(tr, 4, f"=SUM(E{_aq_r1}:E{_aq_rN})", fmt_tot_num)
 
     # New vs Renew section below
     nr_off = tr + 2
@@ -491,6 +534,13 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         aq_ws.write_number(nr_off+2+i, 2, row["Count"], f_num)
         aq_ws.write_number(nr_off+2+i, 3, row["Gross"], f_num)
         aq_ws.write_number(nr_off+2+i, 4, row["Net"],   f_num)
+    # New vs Renew TOTAL
+    _nr_r1 = nr_off + 3; _nr_rN = nr_off + 2 + len(nr_df)
+    aq_ws.write(nr_off+2+len(nr_df), 0, "TOTAL", fmt_tot_lbl)
+    aq_ws.write(nr_off+2+len(nr_df), 1, "", fmt_tot_lbl)
+    aq_ws.write_formula(nr_off+2+len(nr_df), 2, f"=SUM(C{_nr_r1}:C{_nr_rN})", fmt_tot_num)
+    aq_ws.write_formula(nr_off+2+len(nr_df), 3, f"=SUM(D{_nr_r1}:D{_nr_rN})", fmt_tot_num)
+    aq_ws.write_formula(nr_off+2+len(nr_df), 4, f"=SUM(E{_nr_r1}:E{_nr_rN})", fmt_tot_num)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 5 — FULL AWARDED DEALS

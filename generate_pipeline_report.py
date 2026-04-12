@@ -346,6 +346,10 @@ full_df = df[[
     "Strategic Opportunity","Closure Due Quarter","Est. Close Date","Source of Opportunity","Overdue"
 ]].sort_values("Total Net", ascending=False).rename(columns={"Stage_Short":"Stage"})
 
+# ── PRE-COMPUTE ROW COUNTS FOR FORMULAS ─────────────────────────────────────
+# Full Pipeline: header at Excel row 2, data rows 3..fp_last_row
+fp_last_row = 2 + len(full_df)
+
 # ── WRITE EXCEL ───────────────────────────────────────────────────────────────
 with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     wb = writer.book
@@ -373,6 +377,10 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     fmt_grn     = wb.add_format({"bg_color":"#E2EFDA", "border":1, "align":"left"})
     fmt_grn_num = wb.add_format({"bg_color":"#E2EFDA", "num_format":"#,##0", "border":1, "align":"right"})
     fmt_grn_dt  = wb.add_format({"bg_color":"#E2EFDA", "num_format":"dd-mmm-yyyy", "border":1, "align":"center"})
+    tot_fmt = wb.add_format({"bold":True,"bg_color":"#1a3a6b","font_color":"#FFFFFF",
+                              "num_format":"#,##0","border":1,"align":"right"})
+    tot_lbl = wb.add_format({"bold":True,"bg_color":"#1a3a6b","font_color":"#FFFFFF",
+                              "border":1,"align":"left"})
 
     def write_header_row(ws, row, cols, widths=None):
         for c, col in enumerate(cols):
@@ -418,16 +426,21 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     ws.set_column(0, 0, 34)
     ws.set_column(1, 1, 22)
 
-    qar_metrics = {"Total Gross Pipeline (QAR)", "Total Net Pipeline (QAR)",
-                   "Forecasted Gross (QAR)", "Forecasted Net (QAR)"}
-    for r, row in kpi_df.iterrows():
-        ws.write(3+r, 0, row["Metric"], fmt_kpi_lbl)
-        if "%" in row["Metric"]:
-            ws.write_number(3+r, 1, row["Value"]/100, fmt_kpi_pct)
-        elif row["Metric"] in qar_metrics:
-            ws.write_number(3+r, 1, row["Value"], fmt_kpi_val)
-        else:
-            ws.write_number(3+r, 1, row["Value"], fmt_kpi_val)
+    # KPI formulas reference the Full Pipeline sheet (data rows 3..fp_last_row)
+    _fp = "'Full Pipeline'"
+    _n  = fp_last_row
+    kpi_formulas = [
+        ("Total Opportunities",        f"=COUNTA({_fp}!C3:C{_n})",                                        fmt_kpi_val),
+        ("Total Gross Pipeline (QAR)", f"=SUM({_fp}!I3:I{_n})",                                           fmt_kpi_val),
+        ("Total Net Pipeline (QAR)",   f"=SUM({_fp}!J3:J{_n})",                                           fmt_kpi_val),
+        ("Forecasted Gross (QAR)",     f'=SUMIF({_fp}!L3:L{_n},"Yes",{_fp}!I3:I{_n})',                   fmt_kpi_val),
+        ("Forecasted Net (QAR)",       f'=SUMIF({_fp}!L3:L{_n},"Yes",{_fp}!J3:J{_n})',                   fmt_kpi_val),
+        ("Strategic Opportunities",    f'=COUNTIF({_fp}!M3:M{_n},"Yes")',                                 fmt_kpi_val),
+        ("Overdue Deals",              f'=COUNTIF({_fp}!Q3:Q{_n},"YES")',                                 fmt_kpi_val),
+    ]
+    for i, (label, formula, fmt) in enumerate(kpi_formulas):
+        ws.write(3+i, 0, label, fmt_kpi_lbl)
+        ws.write_formula(3+i, 1, formula, fmt)
 
     # Stage table (offset right)
     ws.merge_range("D1:H1", "Pipeline by Stage", fmt_title)
@@ -437,12 +450,19 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     ws.set_column(4, 4, 8)
     ws.set_column(5, 5, 18)
     ws.set_column(6, 6, 18)
-    for r, row in stage_df.iterrows():
-        alt = (r % 2 == 1)
+    for r, row in stage_df.reset_index(drop=True).iterrows():
+        alt  = (r % 2 == 1)
+        xl1  = 4 + r   # 1-based row of this stage cell (0-based = 3+r → 1-based = 4+r)
         ws.write(3+r, 3, row["Stage"], fmt_alt if alt else fmt_text)
-        ws.write_number(3+r, 4, row["Count"], fmt_alt_num if alt else fmt_num)
-        ws.write_number(3+r, 5, row["Gross"], fmt_alt_num if alt else fmt_num)
-        ws.write_number(3+r, 6, row["Net"],   fmt_alt_num if alt else fmt_num)
+        ws.write_formula(3+r, 4, f'=COUNTIF({_fp}!D3:D{_n},D{xl1})',            fmt_alt_num if alt else fmt_num)
+        ws.write_formula(3+r, 5, f'=SUMIF({_fp}!D3:D{_n},D{xl1},{_fp}!I3:I{_n})', fmt_alt_num if alt else fmt_num)
+        ws.write_formula(3+r, 6, f'=SUMIF({_fp}!D3:D{_n},D{xl1},{_fp}!J3:J{_n})', fmt_alt_num if alt else fmt_num)
+    # Stage TOTAL row
+    _sg_first = 4; _sg_last = 3 + len(stage_df)
+    ws.write(3+len(stage_df), 3, "TOTAL", tot_lbl)
+    ws.write_formula(3+len(stage_df), 4, f"=SUM(E{_sg_first}:E{_sg_last})", tot_fmt)
+    ws.write_formula(3+len(stage_df), 5, f"=SUM(F{_sg_first}:F{_sg_last})", tot_fmt)
+    ws.write_formula(3+len(stage_df), 6, f"=SUM(G{_sg_first}:G{_sg_last})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 2 — DU BREAKDOWN (BU mapped)
@@ -463,53 +483,80 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     du_widths = [42, 52, 20, 20, 22]
     write_header_row(du_ws, 1, du_cols, du_widths)
 
-    tot_fmt = wb.add_format({"bold":True,"bg_color":"#1a3a6b","font_color":"#FFFFFF",
-                              "num_format":"#,##0","border":1,"align":"right"})
-    tot_lbl = wb.add_format({"bold":True,"bg_color":"#1a3a6b","font_color":"#FFFFFF",
-                              "border":1,"align":"left"})
     fmt_opp     = wb.add_format({"italic":True,"bg_color":"#FAFAFA","border":1,"align":"left","indent":2})
     fmt_opp_num = wb.add_format({"italic":True,"bg_color":"#FAFAFA","num_format":"#,##0","border":1,"align":"right"})
 
-    # Write rows grouped by BU with BU subtotals
-    current_bu = None
-    r_out = 0
-    bu_groups = du_totals.groupby("BU", sort=False)
+    # ── Pre-compute layout for formula-based subtotals ──────────────────────
+    # Each BU has: 1 header row, then for each DU: 1 DU row + N opp rows
+    # We pre-compute which 0-based row each element lands on so we can write
+    # SUM formulas: opp rows hold raw values; DU row sums its opp rows;
+    # BU row sums its DU rows; Grand Total sums all BU rows.
+    _layout = []   # [(bu_name, bu_r0, [(du_name, du_r0, [opp_r0, ...])])]
+    _pos = 0
     for bu_name, bu_grp in du_totals.groupby("BU"):
-        # BU subtotal row
-        du_ws.write(2+r_out, 0, bu_name, fmt_bu_lbl)
-        du_ws.write(2+r_out, 1, "", fmt_bu_lbl)
-        du_ws.write_number(2+r_out, 2, bu_grp["Gross"].sum(), fmt_bu_num)
-        du_ws.write_number(2+r_out, 3, bu_grp["Net"].sum(),   fmt_bu_num)
-        du_ws.write_number(2+r_out, 4, bu_grp["Forecasted Net"].sum(), fmt_bu_num)
-        r_out += 1
-        # DU detail rows under this BU
-        for _, row in bu_grp.iterrows():
-            alt = (r_out % 2 == 1)
-            du_ws.write(2+r_out, 0, "", fmt_alt if alt else fmt_text)
-            du_ws.write(2+r_out, 1, row["DU"], fmt_alt if alt else fmt_text)
-            du_ws.write_number(2+r_out, 2, row["Gross"], fmt_alt_num if alt else fmt_num)
-            du_ws.write_number(2+r_out, 3, row["Net"],   fmt_alt_num if alt else fmt_num)
-            du_ws.write_number(2+r_out, 4, row["Forecasted Net"], fmt_alt_num if alt else fmt_num)
-            r_out += 1
-            # Opportunity sub-rows for this DU
-            du_deals = du_exp[du_exp["DU"] == row["DU"]].copy()
+        bu_r0 = 2 + _pos; _pos += 1
+        du_list = []
+        for _, drow in bu_grp.iterrows():
+            du_r0 = 2 + _pos; _pos += 1
+            du_deals = du_exp[du_exp["DU"] == drow["DU"]].copy()
+            opp_rows = []
             for _, deal in du_deals.iterrows():
+                opp_rows.append(2 + _pos); _pos += 1
+            du_list.append((drow, du_r0, opp_rows))
+        _layout.append((bu_name, bu_r0, du_list))
+    _grand_r0 = 2 + _pos   # Grand Total row (0-based)
+
+    # ── Write all rows using formula references ───────────────────────────────
+    all_du_rows = []   # collect DU row positions (1-based) for Grand Total
+    for bu_name, bu_r0, du_list in _layout:
+        # DU rows for this BU (used in BU SUM formula)
+        _du_row_nums = [dr0+1 for (_, dr0, _) in du_list]  # 1-based
+        # BU header row — SUM formula over its DU rows (pre-join to avoid f-string nesting)
+        _bu_C = "+".join("C" + str(r) for r in _du_row_nums)
+        _bu_D = "+".join("D" + str(r) for r in _du_row_nums)
+        _bu_E = "+".join("E" + str(r) for r in _du_row_nums)
+        du_ws.write(bu_r0, 0, bu_name, fmt_bu_lbl)
+        du_ws.write(bu_r0, 1, "", fmt_bu_lbl)
+        du_ws.write_formula(bu_r0, 2, "=" + _bu_C, fmt_bu_num)
+        du_ws.write_formula(bu_r0, 3, "=" + _bu_D, fmt_bu_num)
+        du_ws.write_formula(bu_r0, 4, "=" + _bu_E, fmt_bu_num)
+        all_du_rows.extend(_du_row_nums)
+
+        for drow, du_r0, opp_rows in du_list:
+            alt = (du_r0 % 2 == 1)
+            # DU row — SUM formula over its opp rows
+            if opp_rows:
+                _opp_sum = lambda col: f"=SUM({col}{min(opp_rows)+1}:{col}{max(opp_rows)+1})"
+            else:
+                _opp_sum = lambda col: f"=0"
+            du_ws.write(du_r0, 0, "", fmt_alt if alt else fmt_text)
+            du_ws.write(du_r0, 1, drow["DU"], fmt_alt if alt else fmt_text)
+            du_ws.write_formula(du_r0, 2, _opp_sum("C"), fmt_alt_num if alt else fmt_num)
+            du_ws.write_formula(du_r0, 3, _opp_sum("D"), fmt_alt_num if alt else fmt_num)
+            du_ws.write_formula(du_r0, 4, _opp_sum("E"), fmt_alt_num if alt else fmt_num)
+
+            du_deals = du_exp[du_exp["DU"] == drow["DU"]].copy()
+            for opp_r0, (_, deal) in zip(opp_rows, du_deals.iterrows()):
                 opp_label = f"  ↳  {deal['Lead/Opp Name']}"
                 fore_net = deal["Net"] if str(deal.get("Forecasted","")).strip() == "Yes" else 0
-                du_ws.write(2+r_out, 0, "", fmt_opp)
-                du_ws.write(2+r_out, 1, opp_label, fmt_opp)
-                du_ws.write_number(2+r_out, 2, deal["Gross"], fmt_opp_num)
-                du_ws.write_number(2+r_out, 3, deal["Net"],   fmt_opp_num)
-                du_ws.write_number(2+r_out, 4, fore_net,      fmt_opp_num)
-                r_out += 1
+                du_ws.write(opp_r0, 0, "", fmt_opp)
+                du_ws.write(opp_r0, 1, opp_label, fmt_opp)
+                du_ws.write_number(opp_r0, 2, deal["Gross"], fmt_opp_num)
+                du_ws.write_number(opp_r0, 3, deal["Net"],   fmt_opp_num)
+                du_ws.write_number(opp_r0, 4, fore_net,      fmt_opp_num)
 
-    # Grand total
-    t = 2 + r_out
+    # Grand Total — SUM of all BU rows (which themselves SUM their DU/opp rows)
+    _bu_row_nums = [br0+1 for (_, br0, _) in _layout]  # 1-based (renamed to avoid shadowing bu_r0)
+    _gt_C = "+".join("C" + str(r) for r in _bu_row_nums)
+    _gt_D = "+".join("D" + str(r) for r in _bu_row_nums)
+    _gt_E = "+".join("E" + str(r) for r in _bu_row_nums)
+    t = _grand_r0
     du_ws.write(t, 0, "GRAND TOTAL", tot_lbl)
     du_ws.write(t, 1, "", tot_lbl)
-    du_ws.write_number(t, 2, du_totals["Gross"].sum(), tot_fmt)
-    du_ws.write_number(t, 3, du_totals["Net"].sum(),   tot_fmt)
-    du_ws.write_number(t, 4, du_totals["Forecasted Net"].sum(), tot_fmt)
+    du_ws.write_formula(t, 2, "=" + _gt_C, tot_fmt)
+    du_ws.write_formula(t, 3, "=" + _gt_D, tot_fmt)
+    du_ws.write_formula(t, 4, "=" + _gt_E, tot_fmt)
+    r_out = _pos   # keep r_out in sync for downstream references
 
     # DU × Stage detail below
     du_ws.merge_range(t+2, 0, t+2, 5, "BU / DU × Stage Detail", fmt_title)
@@ -525,6 +572,7 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     du_stage = du_stage.merge(fore_du_stage, on=["DU","Stage"], how="left").fillna({"Forecasted Net":0})
     ds_cols = ["BU","Delivery Unit","Stage","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"]
     write_header_row(du_ws, t+3, ds_cols)
+    _ds_data_start = t + 5   # 1-based first data row of DU×Stage detail
     for r, row in du_stage.reset_index(drop=True).iterrows():
         alt = (r % 2 == 1)
         du_ws.write(t+4+r, 0, row["BU"],   fmt_alt if alt else fmt_text)
@@ -533,6 +581,15 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         du_ws.write_number(t+4+r, 3, row["Gross"], fmt_alt_num if alt else fmt_num)
         du_ws.write_number(t+4+r, 4, row["Net"],   fmt_alt_num if alt else fmt_num)
         du_ws.write_number(t+4+r, 5, row["Forecasted Net"], fmt_alt_num if alt else fmt_num)
+    # DU×Stage TOTAL row
+    _ds_data_end = t + 4 + len(du_stage)   # 1-based last data row
+    _ds_tot_r = t + 4 + len(du_stage)      # 0-based total row
+    du_ws.write(_ds_tot_r, 0, "TOTAL", tot_lbl)
+    du_ws.write(_ds_tot_r, 1, "", tot_lbl)
+    du_ws.write(_ds_tot_r, 2, "", tot_lbl)
+    du_ws.write_formula(_ds_tot_r, 3, f"=SUM(D{_ds_data_start}:D{_ds_data_end})", tot_fmt)
+    du_ws.write_formula(_ds_tot_r, 4, f"=SUM(E{_ds_data_start}:E{_ds_data_end})", tot_fmt)
+    du_ws.write_formula(_ds_tot_r, 5, f"=SUM(F{_ds_data_start}:F{_ds_data_end})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 3 — FORECAST PER DU
@@ -551,37 +608,49 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     sum_widths = [42, 38, 10, 8, 20, 20]
     write_header_row(fd_ws, 3, sum_cols, sum_widths)
 
-    current_bu = None
-    r_s = 0
-    for _, row in fore_du_summary.iterrows():
-        # Insert BU group header when BU changes
-        if row["BU"] != current_bu:
-            current_bu = row["BU"]
-            bu_sub = fore_du_summary[fore_du_summary["BU"]==current_bu]
-            fd_ws.write(4+r_s, 0, current_bu, fmt_bu_lbl)
-            fd_ws.write(4+r_s, 1, f"Total: {len(bu_sub)} rows", fmt_bu_lbl)
-            fd_ws.write(4+r_s, 2, "", fmt_bu_lbl)
-            fd_ws.write_number(4+r_s, 3, bu_sub["Count"].sum(), fmt_bu_num)
-            fd_ws.write_number(4+r_s, 4, bu_sub["Gross"].sum(),  fmt_bu_num)
-            fd_ws.write_number(4+r_s, 5, bu_sub["Net"].sum(),    fmt_bu_num)
-            r_s += 1
-        alt = (r_s % 2 == 1)
-        fd_ws.write(4+r_s, 0, "", fmt_alt if alt else fmt_text)
-        fd_ws.write(4+r_s, 1, row["DU"],                  fmt_alt if alt else fmt_text)
-        fd_ws.write(4+r_s, 2, row["Closure Due Quarter"],  fmt_alt if alt else fmt_text)
-        fd_ws.write_number(4+r_s, 3, row["Count"],  fmt_alt_num if alt else fmt_num)
-        fd_ws.write_number(4+r_s, 4, row["Gross"],  fmt_alt_num if alt else fmt_num)
-        fd_ws.write_number(4+r_s, 5, row["Net"],    fmt_alt_num if alt else fmt_num)
-        r_s += 1
+    # Pre-compute layout: BU header row + detail rows per BU
+    _fds_layout = []   # [(bu_name, bu_xl_r, [detail_xl_r, ...])]   (0-based)
+    _fds_pos = 4
+    for bu_name, bu_sub in fore_du_summary.groupby("BU", sort=False):
+        bu_xl_r = _fds_pos; _fds_pos += 1
+        detail_rows = []
+        for _ in bu_sub.itertuples():
+            detail_rows.append(_fds_pos); _fds_pos += 1
+        _fds_layout.append((bu_name, bu_xl_r, detail_rows))
+    _fds_grand_r = _fds_pos
 
-    # Grand total summary
-    ts = 4 + r_s
+    for bu_name, bu_xl_r, detail_rows in _fds_layout:
+        bu_sub = fore_du_summary[fore_du_summary["BU"] == bu_name]
+        _fds_d = "+".join("D" + str(r+1) for r in detail_rows)
+        _fds_e = "+".join("E" + str(r+1) for r in detail_rows)
+        _fds_f = "+".join("F" + str(r+1) for r in detail_rows)
+        fd_ws.write(bu_xl_r, 0, bu_name, fmt_bu_lbl)
+        fd_ws.write(bu_xl_r, 1, f"Total: {len(bu_sub)} rows", fmt_bu_lbl)
+        fd_ws.write(bu_xl_r, 2, "", fmt_bu_lbl)
+        fd_ws.write_formula(bu_xl_r, 3, "=" + _fds_d, fmt_bu_num)
+        fd_ws.write_formula(bu_xl_r, 4, "=" + _fds_e, fmt_bu_num)
+        fd_ws.write_formula(bu_xl_r, 5, "=" + _fds_f, fmt_bu_num)
+        for r_pos, (_, row) in zip(detail_rows, bu_sub.iterrows()):
+            alt = (r_pos % 2 == 1)
+            fd_ws.write(r_pos, 0, "", fmt_alt if alt else fmt_text)
+            fd_ws.write(r_pos, 1, row["DU"],                 fmt_alt if alt else fmt_text)
+            fd_ws.write(r_pos, 2, row["Closure Due Quarter"], fmt_alt if alt else fmt_text)
+            fd_ws.write_number(r_pos, 3, row["Count"], fmt_alt_num if alt else fmt_num)
+            fd_ws.write_number(r_pos, 4, row["Gross"], fmt_alt_num if alt else fmt_num)
+            fd_ws.write_number(r_pos, 5, row["Net"],   fmt_alt_num if alt else fmt_num)
+
+    # Grand Total summary — SUM of all BU header rows
+    _bu_hdr_rows = [bu_xl_r for (_, bu_xl_r, _) in _fds_layout]
+    _gt_D = "+".join("D" + str(r+1) for r in _bu_hdr_rows)
+    _gt_E = "+".join("E" + str(r+1) for r in _bu_hdr_rows)
+    _gt_F = "+".join("F" + str(r+1) for r in _bu_hdr_rows)
+    ts = _fds_grand_r
     fd_ws.write(ts, 0, "GRAND TOTAL", tot_lbl)
     fd_ws.write(ts, 1, "", tot_lbl)
     fd_ws.write(ts, 2, "", tot_lbl)
-    fd_ws.write_number(ts, 3, fore_du_summary["Count"].sum(), tot_fmt)
-    fd_ws.write_number(ts, 4, fore_du_summary["Gross"].sum(), tot_fmt)
-    fd_ws.write_number(ts, 5, fore_du_summary["Net"].sum(),   tot_fmt)
+    fd_ws.write_formula(ts, 3, "=" + _gt_D, tot_fmt)
+    fd_ws.write_formula(ts, 4, "=" + _gt_E, tot_fmt)
+    fd_ws.write_formula(ts, 5, "=" + _gt_F, tot_fmt)
 
     # ── Part 2: Deal-level detail ─────────────────────────────────────────
     det_start = ts + 2
@@ -597,36 +666,49 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
     fd_ws.set_column(8, 8, 18)
     fd_ws.set_column(9, 9, 12)
 
-    current_bu = None
-    r_d = 0
-    for _, row in fore_du_detail.iterrows():
-        if row["BU"] != current_bu:
-            current_bu = row["BU"]
-            bu_grp = fore_du_detail[fore_du_detail["BU"]==current_bu]
-            fd_ws.write(det_start+2+r_d, 0, current_bu, fmt_bu_lbl)
-            for cc in range(1,10): fd_ws.write(det_start+2+r_d, cc, "", fmt_bu_lbl)
-            fd_ws.write_number(det_start+2+r_d, 7, bu_grp["Gross"].sum(), fmt_bu_num)
-            fd_ws.write_number(det_start+2+r_d, 8, bu_grp["Net"].sum(),   fmt_bu_num)
-            r_d += 1
-        alt = (r_d % 2 == 1)
-        fd_ws.write(det_start+2+r_d, 0, "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write(det_start+2+r_d, 1, str(row["DU"])                  if pd.notna(row["DU"])                  else "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write(det_start+2+r_d, 2, str(row["Account Name"])        if pd.notna(row["Account Name"])        else "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write(det_start+2+r_d, 3, str(row["Lead/Opp Name"])       if pd.notna(row["Lead/Opp Name"])       else "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write(det_start+2+r_d, 4, str(row["Stage"])               if pd.notna(row["Stage"])               else "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write(det_start+2+r_d, 5, str(row["Account Manager"])     if pd.notna(row["Account Manager"])     else "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write(det_start+2+r_d, 6, str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "", fmt_grn if not alt else fmt_alt)
-        fd_ws.write_number(det_start+2+r_d, 7, row["Gross"], fmt_grn_num if not alt else fmt_alt_num)
-        fd_ws.write_number(det_start+2+r_d, 8, row["Net"],   fmt_grn_num if not alt else fmt_alt_num)
-        fd_ws.write(det_start+2+r_d, 9, str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "", fmt_grn if not alt else fmt_alt)
-        r_d += 1
+    # Pre-compute layout for detail section
+    _fdd_layout = []   # [(bu_name, bu_xl_r, [detail_xl_r, ...])]
+    _fdd_pos = det_start + 2
+    for bu_name, bu_grp in fore_du_detail.groupby("BU", sort=False):
+        bu_xl_r = _fdd_pos; _fdd_pos += 1
+        detail_rows = []
+        for _ in bu_grp.itertuples():
+            detail_rows.append(_fdd_pos); _fdd_pos += 1
+        _fdd_layout.append((bu_name, bu_xl_r, bu_grp, detail_rows))
+    _fdd_grand_r = _fdd_pos
 
-    # Grand total detail
-    td = det_start + 2 + r_d
+    for bu_name, bu_xl_r, bu_grp, detail_rows in _fdd_layout:
+        _fdd_H = "+".join("H" + str(r+1) for r in detail_rows)
+        _fdd_I = "+".join("I" + str(r+1) for r in detail_rows)
+        fd_ws.write(bu_xl_r, 0, bu_name, fmt_bu_lbl)
+        for cc in range(1, 10):
+            fd_ws.write(bu_xl_r, cc, "", fmt_bu_lbl)
+        fd_ws.write_formula(bu_xl_r, 7, "=" + _fdd_H, fmt_bu_num)
+        fd_ws.write_formula(bu_xl_r, 8, "=" + _fdd_I, fmt_bu_num)
+        for r_pos, (_, row) in zip(detail_rows, bu_grp.iterrows()):
+            alt = (r_pos % 2 == 1)
+            fmtx = fmt_grn if not alt else fmt_alt
+            fmtn = fmt_grn_num if not alt else fmt_alt_num
+            fd_ws.write(r_pos, 0, "", fmtx)
+            fd_ws.write(r_pos, 1, str(row["DU"])                  if pd.notna(row["DU"])                  else "", fmtx)
+            fd_ws.write(r_pos, 2, str(row["Account Name"])        if pd.notna(row["Account Name"])        else "", fmtx)
+            fd_ws.write(r_pos, 3, str(row["Lead/Opp Name"])       if pd.notna(row["Lead/Opp Name"])       else "", fmtx)
+            fd_ws.write(r_pos, 4, str(row["Stage"])               if pd.notna(row["Stage"])               else "", fmtx)
+            fd_ws.write(r_pos, 5, str(row["Account Manager"])     if pd.notna(row["Account Manager"])     else "", fmtx)
+            fd_ws.write(r_pos, 6, str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "", fmtx)
+            fd_ws.write_number(r_pos, 7, row["Gross"], fmtn)
+            fd_ws.write_number(r_pos, 8, row["Net"],   fmtn)
+            fd_ws.write(r_pos, 9, str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "", fmtx)
+
+    # Grand Total detail — SUM of all BU header rows
+    _bu_hdr_H = "+".join("H" + str(bxr+1) for (_, bxr, _, _) in _fdd_layout)
+    _bu_hdr_I = "+".join("I" + str(bxr+1) for (_, bxr, _, _) in _fdd_layout)
+    td = _fdd_grand_r
     fd_ws.write(td, 0, "GRAND TOTAL", tot_lbl)
-    for cc in range(1,7): fd_ws.write(td, cc, "", tot_lbl)
-    fd_ws.write_number(td, 7, fore_du_detail["Gross"].sum(), tot_fmt)
-    fd_ws.write_number(td, 8, fore_du_detail["Net"].sum(),   tot_fmt)
+    for cc in range(1, 7):
+        fd_ws.write(td, cc, "", tot_lbl)
+    fd_ws.write_formula(td, 7, "=" + _bu_hdr_H, tot_fmt)
+    fd_ws.write_formula(td, 8, "=" + _bu_hdr_I, tot_fmt)
     fd_ws.write(td, 9, "", tot_lbl)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -640,25 +722,38 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
 
     sec_cols = ["Sector","Count","Gross (QAR)","Net (QAR)"]
     write_header_row(sa_ws, 1, sec_cols, [24,8,20,20])
-    for r, row in sector_df.iterrows():
+    for r, row in sector_df.reset_index(drop=True).iterrows():
         alt = (r % 2 == 1)
         sa_ws.write(2+r, 0, row["Sector"], fmt_alt if alt else fmt_text)
         sa_ws.write_number(2+r, 1, row["Count"],  fmt_alt_num if alt else fmt_num)
         sa_ws.write_number(2+r, 2, row["Gross"],  fmt_alt_num if alt else fmt_num)
         sa_ws.write_number(2+r, 3, row["Net"],    fmt_alt_num if alt else fmt_num)
+    # Sector TOTAL row
+    _sec_r1 = 3; _sec_rN = 2 + len(sector_df)
+    sa_ws.write(2+len(sector_df), 0, "TOTAL", tot_lbl)
+    sa_ws.write_formula(2+len(sector_df), 1, f"=SUM(B{_sec_r1}:B{_sec_rN})", tot_fmt)
+    sa_ws.write_formula(2+len(sector_df), 2, f"=SUM(C{_sec_r1}:C{_sec_rN})", tot_fmt)
+    sa_ws.write_formula(2+len(sector_df), 3, f"=SUM(D{_sec_r1}:D{_sec_rN})", tot_fmt)
 
-    off = 2 + len(sector_df) + 2
+    off = 2 + len(sector_df) + 1 + 2   # +1 for TOTAL row
     sa_ws.merge_range(off, 0, off, 4, "Pipeline by Account Manager", fmt_title)
     am_cols = ["Account Manager","Count","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"]
     write_header_row(sa_ws, off+1, am_cols, [28,8,20,20,22])
     sa_ws.set_column(4, 4, 22)
-    for r, row in am_df.iterrows():
+    for r, row in am_df.reset_index(drop=True).iterrows():
         alt = (r % 2 == 1)
         sa_ws.write(off+2+r, 0, row["Account Manager"], fmt_alt if alt else fmt_text)
         sa_ws.write_number(off+2+r, 1, row["Count"],         fmt_alt_num if alt else fmt_num)
         sa_ws.write_number(off+2+r, 2, row["Gross"],         fmt_alt_num if alt else fmt_num)
         sa_ws.write_number(off+2+r, 3, row["Net"],           fmt_alt_num if alt else fmt_num)
         sa_ws.write_number(off+2+r, 4, row["Forecasted Net"],fmt_alt_num if alt else fmt_num)
+    # AM TOTAL row
+    _am_r1 = off + 3; _am_rN = off + 2 + len(am_df)
+    sa_ws.write(off+2+len(am_df), 0, "TOTAL", tot_lbl)
+    sa_ws.write_formula(off+2+len(am_df), 1, f"=SUM(B{_am_r1}:B{_am_rN})", tot_fmt)
+    sa_ws.write_formula(off+2+len(am_df), 2, f"=SUM(C{_am_r1}:C{_am_rN})", tot_fmt)
+    sa_ws.write_formula(off+2+len(am_df), 3, f"=SUM(D{_am_r1}:D{_am_rN})", tot_fmt)
+    sa_ws.write_formula(off+2+len(am_df), 4, f"=SUM(E{_am_r1}:E{_am_rN})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 4 — QUARTERLY & PROBABILITY
@@ -671,24 +766,37 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
 
     q_cols = ["Quarter","Count","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"]
     write_header_row(qp_ws, 1, q_cols, [12,8,20,20,22])
-    for r, row in q_df.iterrows():
+    for r, row in q_df.reset_index(drop=True).iterrows():
         alt = (r % 2 == 1)
         qp_ws.write(2+r, 0, row["Closure Due Quarter"], fmt_alt if alt else fmt_text)
         qp_ws.write_number(2+r, 1, row["Count"],         fmt_alt_num if alt else fmt_num)
         qp_ws.write_number(2+r, 2, row["Gross"],         fmt_alt_num if alt else fmt_num)
         qp_ws.write_number(2+r, 3, row["Net"],           fmt_alt_num if alt else fmt_num)
         qp_ws.write_number(2+r, 4, row["Forecasted Net"],fmt_alt_num if alt else fmt_num)
+    # Quarter TOTAL row
+    _q_r1 = 3; _q_rN = 2 + len(q_df)
+    qp_ws.write(2+len(q_df), 0, "TOTAL", tot_lbl)
+    qp_ws.write_formula(2+len(q_df), 1, f"=SUM(B{_q_r1}:B{_q_rN})", tot_fmt)
+    qp_ws.write_formula(2+len(q_df), 2, f"=SUM(C{_q_r1}:C{_q_rN})", tot_fmt)
+    qp_ws.write_formula(2+len(q_df), 3, f"=SUM(D{_q_r1}:D{_q_rN})", tot_fmt)
+    qp_ws.write_formula(2+len(q_df), 4, f"=SUM(E{_q_r1}:E{_q_rN})", tot_fmt)
 
-    off2 = 2 + len(q_df) + 2
+    off2 = 2 + len(q_df) + 1 + 2   # +1 for TOTAL row
     qp_ws.merge_range(off2, 0, off2, 3, "Pipeline by Winning Probability", fmt_title)
     pb_cols = ["Winning Probability","Count","Gross (QAR)","Net (QAR)"]
     write_header_row(qp_ws, off2+1, pb_cols, [22,8,20,20])
-    for r, row in prob_df.iterrows():
+    for r, row in prob_df.reset_index(drop=True).iterrows():
         alt = (r % 2 == 1)
         qp_ws.write(off2+2+r, 0, row["Winning Probability"], fmt_alt if alt else fmt_text)
         qp_ws.write_number(off2+2+r, 1, row["Count"], fmt_alt_num if alt else fmt_num)
         qp_ws.write_number(off2+2+r, 2, row["Gross"], fmt_alt_num if alt else fmt_num)
         qp_ws.write_number(off2+2+r, 3, row["Net"],   fmt_alt_num if alt else fmt_num)
+    # Probability TOTAL row
+    _pb_r1 = off2 + 3; _pb_rN = off2 + 2 + len(prob_df)
+    qp_ws.write(off2+2+len(prob_df), 0, "TOTAL", tot_lbl)
+    qp_ws.write_formula(off2+2+len(prob_df), 1, f"=SUM(B{_pb_r1}:B{_pb_rN})", tot_fmt)
+    qp_ws.write_formula(off2+2+len(prob_df), 2, f"=SUM(C{_pb_r1}:C{_pb_rN})", tot_fmt)
+    qp_ws.write_formula(off2+2+len(prob_df), 3, f"=SUM(D{_pb_r1}:D{_pb_rN})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 5 — FORECAST
@@ -719,11 +827,12 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
         else:
             fw.write_blank(2+r, 9, None, fmt_grn_dt)
 
-    # Totals
+    # TOTAL row with SUM formulas
     t2 = 2 + len(fore_df)
+    _fc_r1 = 3; _fc_rN = 2 + len(fore_df)
     fw.write(t2, 0, "TOTAL", tot_lbl)
-    fw.write_number(t2, 5, fore_df["Total Gross"].sum(), tot_fmt)
-    fw.write_number(t2, 6, fore_df["Total Net"].sum(),   tot_fmt)
+    fw.write_formula(t2, 5, f"=SUM(F{_fc_r1}:F{_fc_rN})", tot_fmt)
+    fw.write_formula(t2, 6, f"=SUM(G{_fc_r1}:G{_fc_rN})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 6 — OVERDUE
@@ -751,6 +860,10 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
             ow.write_blank(2+r, 5, None, fmt_red_dt)
         ow.write(2+r, 6, str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "", fmt_red)
         ow.write(2+r, 7, str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "", fmt_red)
+    # Overdue TOTAL row
+    _ov_r1 = 3; _ov_rN = 2 + len(overdue_df)
+    ow.write(2+len(overdue_df), 0, "TOTAL", tot_lbl)
+    ow.write_formula(2+len(overdue_df), 4, f"=SUM(E{_ov_r1}:E{_ov_rN})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 7 — FULL PIPELINE
@@ -796,6 +909,11 @@ with pd.ExcelWriter(OUT_FILE, engine="xlsxwriter") as writer:
             pw.write_blank(2+r, 14, None, d_fmt)
         pw.write(2+r, 15, str(row["Source of Opportunity"]) if pd.notna(row["Source of Opportunity"]) else "", t_fmt)
         pw.write(2+r, 16, "YES" if is_overdue else "", t_fmt)
+    # Full Pipeline TOTAL row
+    _fp_r1 = 3; _fp_rN = 2 + len(full_df)
+    pw.write(_fp_rN, 0, "TOTAL", tot_lbl)
+    pw.write_formula(_fp_rN, 8, f"=SUM(I{_fp_r1}:I{_fp_rN})", tot_fmt)
+    pw.write_formula(_fp_rN, 9, f"=SUM(J{_fp_r1}:J{_fp_rN})", tot_fmt)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 8 — PIPELINE BREAKDOWN (styled, one row per DU per opportunity)

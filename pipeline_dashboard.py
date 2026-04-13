@@ -1179,6 +1179,12 @@ def load_am_pipeline(file):
         df = df.rename(columns={"Gross (Breakdown)": "Gross (breakdown)"})
     if "Net (Breakdown)" in df.columns:
         df = df.rename(columns={"Net (Breakdown)": "Net (breakdown)"})
+    # Normalize AM names in Capability Sales at load time so ALL downstream
+    # code (Full Pipeline sheet, UI display, AM explosion) sees clean names
+    if "Capability Sales" in df.columns:
+        df["Capability Sales"] = df["Capability Sales"].apply(
+            lambda v: "\n".join(_clean_am_list(v)) if pd.notna(v) else v
+        )
     return df
 
 @st.cache_data
@@ -2216,7 +2222,6 @@ if uploaded_am and "🟠 AM Pipeline" in tab_idx:
     col_am1, col_am2 = st.columns(2)
     with col_am1:
         st.subheader("Net Pipeline by Account Manager")
-        import plotly.express as px_am
         fig_am2 = px.bar(am_ui_agg, x="Account Manager", y="Net", text=am_ui_agg["Net"].apply(lambda v: f"{v/1e6:.1f}M"),
                          color="Net", color_continuous_scale="Blues")
         fig_am2.update_traces(textposition="outside")

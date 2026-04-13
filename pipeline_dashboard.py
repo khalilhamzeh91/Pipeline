@@ -1142,11 +1142,11 @@ MONTHS_AM = ["January","February","March","April","May","June",
 
 def _clean_am_list(value):
     if pd.isna(value) or str(value).strip() in ("","nan"): return []
+    import re as _re
     seen = {}
-    for name in str(value).split("\n"):
+    for name in _re.split(r'\r\n|\r|\n', str(value)):
         name = name.strip()
         if not name: continue
-        # Normalize known names
         if "khalil" in name.lower():  name = "Khalil Hamzeh"
         elif "yazan" in name.lower(): name = "Yazan Al Razem"
         seen[name] = None

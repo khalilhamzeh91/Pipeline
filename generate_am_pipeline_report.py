@@ -73,8 +73,9 @@ def _clean_am_list(value):
     """Deduplicate and normalize AM names from newline-separated field."""
     if pd.isna(value) or str(value).strip() in ("", "nan"):
         return []
+    import re as _re
     seen = {}
-    for name in str(value).split("\n"):
+    for name in _re.split(r'\r\n|\r|\n', str(value)):
         name = name.strip()
         if not name:
             continue

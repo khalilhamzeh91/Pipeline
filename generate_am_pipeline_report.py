@@ -83,6 +83,14 @@ def _clean_am_list(value):
         seen[name] = None
     return list(seen.keys())
 
+# Normalize Capability Sales column in raw df so all sheets use clean names
+def _normalize_am_cell(value):
+    names = _clean_am_list(value)
+    return "\n".join(names) if names else value
+
+if "Capability Sales" in df.columns:
+    df["Capability Sales"] = df["Capability Sales"].apply(_normalize_am_cell)
+
 # ── EXPLODE BY AM (Capability Sales) ─────────────────────────────────────────
 am_rows = []
 for deal_idx, row in df.iterrows():

@@ -1642,6 +1642,336 @@ def export_am_pipeline_excel(file):
     return output.read()
 
 
+@st.cache_data
+def load_am_awarded(file):
+    xl = pd.ExcelFile(file)
+    sheet = "Export" if "Export" in xl.sheet_names else xl.sheet_names[0]
+    df = pd.read_excel(file, sheet_name=sheet)
+    df.columns = df.columns.str.strip()
+    df = df.dropna(subset=["Opportunity Name"])
+    df = df[df["Opportunity Name"].astype(str).str.strip().ne("")]
+    df["Total Gross"]   = pd.to_numeric(df["Total Gross"], errors="coerce").fillna(0)
+    df["Total Net"]     = pd.to_numeric(df["Total Net"],   errors="coerce").fillna(0)
+    pv_col = next((c for c in df.columns if "project value" in c.lower() or "contract value" in c.lower()), None)
+    df["Project Value"] = pd.to_numeric(df[pv_col], errors="coerce").fillna(0) if pv_col else 0
+    df["Contracted"]    = df["Contracted"].astype(str).str.strip()
+    df["Award Quarter"] = df["Award Quarter"].astype(str).str.strip()
+    df["New/Renew"]     = df["New/Renew"].astype(str).str.strip()
+    if "Capability Sales" in df.columns:
+        df["Capability Sales"] = df["Capability Sales"].apply(
+            lambda v: "\n".join(_clean_am_list(v)) if pd.notna(v) else v
+        )
+    return df.reset_index(drop=True)
+
+
+@st.cache_data
+def export_am_awarded_excel(file):
+    TODAY   = date.today()
+    mapping = load_coa()
+    df      = load_am_awarded(file)
+
+    # Explode by AM
+    am_rows = []
+    for deal_idx, row in df.iterrows():
+        ams = _clean_am_list(row.get("Capability Sales", ""))
+        if not ams: ams = ["Unassigned"]
+        for i, am in enumerate(ams):
+            nr = {c: row[c] for c in df.columns}
+            nr["AM_exp"] = am; nr["_is_first"] = (i == 0)
+            nr["_am_count"] = len(ams); nr["_deal_idx"] = deal_idx
+            am_rows.append(nr)
+    am_exp = pd.DataFrame(am_rows)
+
+    # Explode by DU
+    import re as _re
+    du_rows = []
+    for _, row in df.iterrows():
+        dus   = _re.split(r"\r\n|\r|\n", str(row.get("DU","")).strip())           if pd.notna(row.get("DU"))                   else ["Unknown"]
+        gross = _re.split(r"\r\n|\r|\n", str(row.get("Gross (breakdown)","")).replace(",","")) if pd.notna(row.get("Gross (breakdown)")) else ["0"]
+        net   = _re.split(r"\r\n|\r|\n", str(row.get("Net (breakdown)","")).replace(",",""))   if pd.notna(row.get("Net (breakdown)"))   else ["0"]
+        dus = [x.strip() for x in dus if x.strip()]   or ["Unknown"]
+        gross= [x.strip() for x in gross if x.strip()]or ["0"]
+        net  = [x.strip() for x in net  if x.strip()]  or ["0"]
+        n = max(len(dus), len(gross), len(net))
+        for i in range(n):
+            du = dus[i] if i < len(dus) else dus[-1]
+            try:   gv = float(gross[i] if i < len(gross) else "0")
+            except: gv = 0.0
+            try:   nv = float(net[i]   if i < len(net)   else "0")
+            except: nv = 0.0
+            du_rows.append({"BU": du_to_bu(du, mapping), "DU": du, "Gross": gv, "Net": nv,
+                            "Contracted": str(row.get("Contracted","")).strip(),
+                            "Award Quarter": row.get("Award Quarter",""),
+                            "New/Renew": row.get("New/Renew",""),
+                            "Account Name": row.get("Account Name",""),
+                            "Opportunity Name": row.get("Opportunity Name","")})
+    du_exp = pd.DataFrame(du_rows)
+
+    # Summary tables
+    am_agg = (am_exp.groupby("AM_exp").agg(Count=("Opportunity Name","nunique"),
+              Gross=("Total Gross","sum"),Net=("Total Net","sum"),PV=("Project Value","sum"))
+              .reset_index().rename(columns={"AM_exp":"Account Manager"}).sort_values("Net",ascending=False))
+    c_am = (am_exp[am_exp["Contracted"]=="Yes"].groupby("AM_exp")["Total Net"].sum()
+            .reset_index().rename(columns={"AM_exp":"Account Manager","Total Net":"Contracted Net"}))
+    am_agg = am_agg.merge(c_am, on="Account Manager", how="left").fillna({"Contracted Net":0})
+
+    q_df = (df.groupby("Award Quarter").agg(Count=("Opportunity Name","count"),
+            Gross=("Total Gross","sum"),Net=("Total Net","sum")).reset_index().sort_values("Award Quarter"))
+    c_q = (df[df["Contracted"]=="Yes"].groupby("Award Quarter")["Total Net"].sum()
+           .reset_index().rename(columns={"Total Net":"Contracted Net"}))
+    q_df = q_df.merge(c_q, on="Award Quarter", how="left").fillna({"Contracted Net":0})
+
+    nr_df = (df.groupby("New/Renew").agg(Count=("Opportunity Name","count"),
+             Gross=("Total Gross","sum"),Net=("Total Net","sum")).reset_index().sort_values("Net",ascending=False))
+
+    du_totals = (du_exp.groupby(["BU","DU"])[["Gross","Net"]].sum().reset_index()
+                 .sort_values(["BU","Net"],ascending=[True,False]))
+    c_du = (du_exp[du_exp["Contracted"]=="Yes"].groupby("DU")["Net"].sum()
+            .reset_index().rename(columns={"Net":"Contracted Net"}))
+    du_totals = du_totals.merge(c_du, on="DU", how="left").fillna({"Contracted Net":0})
+
+    full_df = df[["SNo.","Account Name","Opportunity Name","Capability Sales","BU","DU",
+                  "Total Gross","Total Net","Project Value","New/Renew","Award Quarter","Contracted"]
+                 ].sort_values("Total Net", ascending=False)
+    fp_last = 2 + len(full_df)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        wb = writer.book
+        F  = _xl_formats(wb)
+        fmt_bu_hdr2 = wb.add_format({"bold":True,"bg_color":"#2E5FA3","font_color":"#FFFFFF","border":1,"align":"left","font_size":11})
+
+        def _ws(name, color):
+            ws = wb.add_worksheet(name); ws.set_zoom(90); ws.set_tab_color(color)
+            writer.sheets[name] = ws; return ws
+
+        def _tot_row(ws, xl_r, ncols, skip_cols=None):
+            ws.write(xl_r, 0, "TOTAL", F["tot_lbl"])
+            for c in range(1, ncols):
+                if skip_cols and c in skip_cols: ws.write(xl_r, c, "", F["tot_lbl"])
+
+        _fp = "'Full Awarded'"; _n = fp_last
+
+        # ── SHEET 1: SUMMARY ─────────────────────────────────────────────────
+        ws = _ws("Summary","#1a3a6b")
+        ws.merge_range("A1:C1",f"AM Awarded Deals Summary — {TODAY.strftime('%d %B %Y')}",F["title"]); ws.set_row(0,28)
+        _hdr(ws,2,["Metric","Value"],[34,22],F["header"])
+        kpis = [
+            ("Total Awarded Deals",         f"=COUNTA({_fp}!C3:C{_n})"),
+            ("Total Gross (QAR)",            f"=SUM({_fp}!G3:G{_n})"),
+            ("Total Net (QAR)",              f"=SUM({_fp}!H3:H{_n})"),
+            ("Total Project Value (QAR)",    f"=SUM({_fp}!I3:I{_n})"),
+            ("Contracted Deals",             f'=COUNTIF({_fp}!L3:L{_n},"Yes")'),
+            ("New Deals",                    f'=COUNTIF({_fp}!J3:J{_n},"New")'),
+            ("Renew Deals",                  f'=COUNTIF({_fp}!J3:J{_n},"Renew")'),
+        ]
+        for i,(lbl,fml) in enumerate(kpis):
+            ws.write(3+i,0,lbl,F["kpi_lbl"]); ws.write_formula(3+i,1,fml,F["kpi_val"])
+
+        ws.merge_range("D1:H1","By Award Quarter",F["title"])
+        _hdr(ws,2,["Quarter","Count","Gross (QAR)","Net (QAR)","Contracted Net (QAR)"],None,F["header"])
+        ws.set_column(3,3,14); ws.set_column(4,4,8); ws.set_column(5,5,18); ws.set_column(6,6,18); ws.set_column(7,7,22)
+        for r,row in q_df.reset_index(drop=True).iterrows():
+            alt=r%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+            ws.write(3+r,3,row["Award Quarter"],tf); ws.write_number(3+r,4,row["Count"],nf)
+            ws.write_number(3+r,5,row["Gross"],nf); ws.write_number(3+r,6,row["Net"],nf)
+            ws.write_number(3+r,7,row["Contracted Net"],nf)
+        _qr=3+len(q_df); ws.write(_qr,3,"TOTAL",F["tot_lbl"])
+        for ci,cl in enumerate(["E","F","G","H"],1): ws.write_formula(_qr,3+ci,f"=SUM({cl}4:{cl}{_qr})",F["tot_num"])
+
+        _nr_off=_qr+2; ws.merge_range(_nr_off,3,_nr_off,7,"New vs Renew",fmt_bu_hdr2)
+        _hdr(ws,_nr_off+1,["Type","Count","Gross (QAR)","Net (QAR)",""],None,F["header"])
+        for r,row in nr_df.reset_index(drop=True).iterrows():
+            alt=r%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+            ws.write(_nr_off+2+r,3,row["New/Renew"],tf); ws.write_number(_nr_off+2+r,4,row["Count"],nf)
+            ws.write_number(_nr_off+2+r,5,row["Gross"],nf); ws.write_number(_nr_off+2+r,6,row["Net"],nf)
+            ws.write(_nr_off+2+r,7,"",tf)
+        _nrr=_nr_off+2+len(nr_df); ws.write(_nrr,3,"TOTAL",F["tot_lbl"])
+        s0=_nr_off+3
+        for ci,cl in enumerate(["E","F","G"],1): ws.write_formula(_nrr,3+ci,f"=SUM({cl}{s0}:{cl}{_nrr})",F["tot_num"])
+        ws.write(_nrr,7,"",F["tot_lbl"])
+
+        # ── SHEET 2: BY ACCOUNT MANAGER ──────────────────────────────────────
+        aw=_ws("By Account Manager","#FF8C00")
+        aw.merge_range("A1:F1",f"Awarded by Account Manager (Capability Sales) — {TODAY.strftime('%d %B %Y')}",F["title"]); aw.set_row(0,28)
+        _hdr(aw,1,["Account Manager","Deals","Gross (QAR)","Net (QAR)","Project Value (QAR)","Contracted Net (QAR)"],
+             [34,8,20,20,22,22],F["header"])
+        _ams=3
+        for r,row in am_agg.reset_index(drop=True).iterrows():
+            alt=r%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+            aw.write(2+r,0,row["Account Manager"],tf)
+            aw.write_number(2+r,1,row["Count"],nf); aw.write_number(2+r,2,row["Gross"],nf)
+            aw.write_number(2+r,3,row["Net"],nf);   aw.write_number(2+r,4,row["PV"],nf)
+            aw.write_number(2+r,5,row["Contracted Net"],nf)
+        _amrN=2+len(am_agg); aw.write(_amrN,0,"TOTAL",F["tot_lbl"])
+        for ci,cl in enumerate(["B","C","D","E","F"],1): aw.write_formula(_amrN,ci,f"=SUM({cl}{_ams}:{cl}{_amrN})",F["tot_num"])
+
+        det_off=_amrN+2; aw.merge_range(det_off,0,det_off,6,"Deal Detail by Account Manager",fmt_bu_hdr2); aw.set_row(det_off,22)
+        _hdr(aw,det_off+1,["Account Manager","Account Name","Opportunity","Quarter","Type","Gross (QAR)","Net (QAR)"],
+             [30,28,44,12,10,18,18],F["header"])
+        _det_layout=[]; _det_pos=det_off+2
+        for am_name,am_grp in am_exp.groupby("AM_exp",sort=False):
+            bu_xl=_det_pos; _det_pos+=1
+            deal_rows_xl=[]
+            for _ in am_grp.itertuples(): deal_rows_xl.append(_det_pos); _det_pos+=1
+            _det_layout.append((am_name,bu_xl,am_grp,deal_rows_xl))
+        _det_bu_rows=[]
+        for am_name,bu_xl,am_grp,deal_rows_xl in _det_layout:
+            dF="+".join("F"+str(r+1) for r in deal_rows_xl); dG="+".join("G"+str(r+1) for r in deal_rows_xl)
+            aw.write(bu_xl,0,am_name,F["bu_lbl"])
+            for cc in range(1,7): aw.write(bu_xl,cc,"",F["bu_lbl"])
+            aw.write_formula(bu_xl,5,"="+dF,F["bu_num"]); aw.write_formula(bu_xl,6,"="+dG,F["bu_num"])
+            _det_bu_rows.append(bu_xl+1)
+            for r_pos,(_,row) in zip(deal_rows_xl,am_grp.iterrows()):
+                alt=r_pos%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+                aw.write(r_pos,0,am_name,tf)
+                aw.write(r_pos,1,str(row["Account Name"])    if pd.notna(row["Account Name"])    else "",tf)
+                aw.write(r_pos,2,str(row["Opportunity Name"])if pd.notna(row["Opportunity Name"])else "",tf)
+                aw.write(r_pos,3,str(row["Award Quarter"])   if pd.notna(row["Award Quarter"])   else "",tf)
+                aw.write(r_pos,4,str(row["New/Renew"])       if pd.notna(row["New/Renew"])       else "",tf)
+                aw.write_number(r_pos,5,row["Total Gross"],nf); aw.write_number(r_pos,6,row["Total Net"],nf)
+        gtF="+".join("F"+str(r) for r in _det_bu_rows); gtG="+".join("G"+str(r) for r in _det_bu_rows)
+        gt_row=_det_pos; aw.write(gt_row,0,"GRAND TOTAL",F["tot_lbl"])
+        for cc in range(1,5): aw.write(gt_row,cc,"",F["tot_lbl"])
+        aw.write_formula(gt_row,5,"="+gtF,F["tot_num"]); aw.write_formula(gt_row,6,"="+gtG,F["tot_num"])
+
+        # ── SHEET 3: DU BREAKDOWN ─────────────────────────────────────────────
+        dw=_ws("DU Breakdown","#FF8C00")
+        dw.merge_range("A1:E1","Gross & Net Breakdown by BU / Delivery Unit",F["title"]); dw.set_row(0,28)
+        _hdr(dw,1,["BU","Delivery Unit / Opportunity","Gross (QAR)","Net (QAR)","Contracted Net (QAR)"],
+             [42,52,20,20,22],F["header"])
+        _du_layout=[]; _du_pos=0
+        for bu_name,bu_grp in du_totals.groupby("BU"):
+            bu_r0=2+_du_pos; _du_pos+=1; du_list=[]
+            for _,drow in bu_grp.iterrows():
+                du_r0=2+_du_pos; _du_pos+=1
+                du_deals=du_exp[du_exp["DU"]==drow["DU"]].copy()
+                opp_rows=[]
+                for _ in du_deals.itertuples(): opp_rows.append(2+_du_pos); _du_pos+=1
+                du_list.append((drow,du_r0,opp_rows))
+            _du_layout.append((bu_name,bu_r0,bu_grp,du_list))
+        _du_grand_r=2+_du_pos; _du_bu_rows=[]
+        for bu_name,bu_r0,bu_grp,du_list in _du_layout:
+            r1s=[dr0+1 for (_,dr0,_) in du_list]
+            bC="+".join("C"+str(r) for r in r1s); bD="+".join("D"+str(r) for r in r1s); bE="+".join("E"+str(r) for r in r1s)
+            dw.write(bu_r0,0,bu_name,F["bu_lbl"]); dw.write(bu_r0,1,"",F["bu_lbl"])
+            dw.write_formula(bu_r0,2,"="+bC,F["bu_num"]); dw.write_formula(bu_r0,3,"="+bD,F["bu_num"]); dw.write_formula(bu_r0,4,"="+bE,F["bu_num"])
+            _du_bu_rows.append(bu_r0+1)
+            for drow,du_r0,opp_rows in du_list:
+                alt=du_r0%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+                if opp_rows:
+                    _r1=min(opp_rows)+1; _rN=max(opp_rows)+1
+                    def _os(c,r1=_r1,rN=_rN): return f"=SUM({c}{r1}:{c}{rN})"
+                else:
+                    def _os(c): return "=0"
+                dw.write(du_r0,0,"",tf); dw.write(du_r0,1,drow["DU"],tf)
+                dw.write_formula(du_r0,2,_os("C"),nf); dw.write_formula(du_r0,3,_os("D"),nf); dw.write_formula(du_r0,4,_os("E"),nf)
+                du_deals=du_exp[du_exp["DU"]==drow["DU"]].copy()
+                for opp_r0,(_,deal) in zip(opp_rows,du_deals.iterrows()):
+                    cn=deal["Net"] if str(deal.get("Contracted","")).strip()=="Yes" else 0
+                    dw.write(opp_r0,0,"",F["opp"]); dw.write(opp_r0,1,f"  \u21b3  {deal['Opportunity Name']}",F["opp"])
+                    dw.write_number(opp_r0,2,deal["Gross"],F["opp_num"]); dw.write_number(opp_r0,3,deal["Net"],F["opp_num"]); dw.write_number(opp_r0,4,cn,F["opp_num"])
+        tC="+".join("C"+str(r) for r in _du_bu_rows); tD="+".join("D"+str(r) for r in _du_bu_rows); tE="+".join("E"+str(r) for r in _du_bu_rows)
+        t=_du_grand_r; dw.write(t,0,"GRAND TOTAL",F["tot_lbl"]); dw.write(t,1,"",F["tot_lbl"])
+        dw.write_formula(t,2,"="+tC,F["tot_num"]); dw.write_formula(t,3,"="+tD,F["tot_num"]); dw.write_formula(t,4,"="+tE,F["tot_num"])
+
+        # ── SHEET 4: QUARTERLY PLAN ──────────────────────────────────────────
+        qw=_ws("Quarterly Plan","#DAA520")
+        qw.merge_range("A1:E1",f"Awarded by Quarter — {TODAY.strftime('%d %B %Y')}",F["title"]); qw.set_row(0,28)
+        _hdr(qw,1,["Quarter","Count","Gross (QAR)","Net (QAR)","Contracted Net (QAR)"],[14,8,20,20,22],F["header"])
+        for r,row in q_df.reset_index(drop=True).iterrows():
+            alt=r%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+            qw.write(2+r,0,row["Award Quarter"],tf); qw.write_number(2+r,1,row["Count"],nf)
+            qw.write_number(2+r,2,row["Gross"],nf); qw.write_number(2+r,3,row["Net"],nf); qw.write_number(2+r,4,row["Contracted Net"],nf)
+        _qr2=2+len(q_df); qw.write(_qr2,0,"TOTAL",F["tot_lbl"])
+        for ci,cl in enumerate(["B","C","D","E"],1): qw.write_formula(_qr2,ci,f"=SUM({cl}3:{cl}{_qr2})",F["tot_num"])
+        _nr2=_qr2+2; qw.merge_range(_nr2,0,_nr2,4,"New vs Renew",fmt_bu_hdr2)
+        _hdr(qw,_nr2+1,["Type","Count","Gross (QAR)","Net (QAR)",""],None,F["header"])
+        for r,row in nr_df.reset_index(drop=True).iterrows():
+            alt=r%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+            qw.write(_nr2+2+r,0,row["New/Renew"],tf); qw.write_number(_nr2+2+r,1,row["Count"],nf)
+            qw.write_number(_nr2+2+r,2,row["Gross"],nf); qw.write_number(_nr2+2+r,3,row["Net"],nf); qw.write(_nr2+2+r,4,"",tf)
+        _nrr2=_nr2+2+len(nr_df); qw.write(_nrr2,0,"TOTAL",F["tot_lbl"])
+        s2=_nr2+3
+        for ci,cl in enumerate(["B","C","D"],1): qw.write_formula(_nrr2,ci,f"=SUM({cl}{s2}:{cl}{_nrr2})",F["tot_num"])
+        qw.write(_nrr2,4,"",F["tot_lbl"])
+
+        # ── SHEET 5: AM BREAKDOWN ────────────────────────────────────────────
+        am_fh_deal=wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#1a3a6b","border":1,"align":"center","text_wrap":True})
+        am_fh_am  =wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#FF8C00","border":1,"align":"center","text_wrap":True})
+        am_fh_fin =wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#2E7D32","border":1,"align":"center","text_wrap":True})
+        am_fh_oth =wb.add_format({"bold":True,"font_color":"#FFFFFF","bg_color":"#4472C4","border":1,"align":"center","text_wrap":True})
+        am_fd_deal=wb.add_format({"border":1,"align":"left", "bg_color":"#DEEAF1"})
+        am_fd_am  =wb.add_format({"border":1,"align":"left", "bg_color":"#FCE4D6"})
+        am_fd_fin =wb.add_format({"border":1,"align":"right","bg_color":"#E2EFDA","num_format":"#,##0"})
+        am_fd_oth =wb.add_format({"border":1,"align":"left", "bg_color":"#EBF0FB"})
+        am_tot_lbl=wb.add_format({"bold":True,"bg_color":"#1a3a6b","font_color":"#FFFFFF","border":1,"align":"left"})
+        am_tot_num=wb.add_format({"bold":True,"bg_color":"#1a3a6b","font_color":"#FFFFFF","border":1,"align":"right","num_format":"#,##0"})
+        am_fmt_title=wb.add_format({"bold":True,"font_size":13,"font_color":"#FFFFFF","bg_color":"#1a3a6b","align":"center","valign":"vcenter"})
+
+        ambw=_ws("AM Breakdown","#FF8C00")
+        am_bd=[("SNo.",6,"deal"),("Account Name",28,"deal"),("Opportunity",44,"deal"),
+               ("Capability Sales",30,"am"),("New/Renew",12,"other"),("Quarter",10,"other"),
+               ("Contracted",12,"other"),("All Cap. Sales",28,"other"),
+               ("Gross (QAR)",18,"finance"),("Net (QAR)",18,"finance"),("Project Value (QAR)",20,"finance")]
+        am_nc=len(am_bd)
+        am_hf={"deal":am_fh_deal,"am":am_fh_am,"finance":am_fh_fin,"other":am_fh_oth}
+        am_df_={"deal":am_fd_deal,"am":am_fd_am,"finance":am_fd_fin,"other":am_fd_oth}
+        ambw.merge_range(0,0,0,am_nc-1,"AM Awarded — Expanded by Capability Sales",am_fmt_title); ambw.set_row(0,28)
+        for c,(cn,cw,ct) in enumerate(am_bd): ambw.write(1,c,cn,am_hf[ct]); ambw.set_column(c,c,cw)
+        ambw.set_row(1,28); ambw.freeze_panes(2,0)
+        am_cmap={cn:c for c,(cn,_,_) in enumerate(am_bd)}
+        _bw_s=3
+        for xl_r,(_,row) in enumerate(am_exp.iterrows(),start=2):
+            def _a(col,val,ct):
+                c=am_cmap[col]; fmt=am_df_[ct]
+                if val is None or (isinstance(val,float) and pd.isna(val)): ambw.write_blank(xl_r,c,None,fmt)
+                elif isinstance(val,(int,float)): ambw.write_number(xl_r,c,val,fmt)
+                else: ambw.write(xl_r,c,str(val),fmt)
+            _a("SNo.",row.get("SNo."),"deal"); _a("Account Name",row.get("Account Name"),"deal")
+            _a("Opportunity",row.get("Opportunity Name"),"deal"); _a("Capability Sales",row.get("AM_exp"),"am")
+            _a("New/Renew",row.get("New/Renew"),"other"); _a("Quarter",row.get("Award Quarter"),"other")
+            _a("Contracted",row.get("Contracted"),"other"); _a("All Cap. Sales",row.get("Capability Sales"),"other")
+            _a("Gross (QAR)",row.get("Total Gross"),"finance"); _a("Net (QAR)",row.get("Total Net"),"finance")
+            _a("Project Value (QAR)",row.get("Project Value"),"finance")
+        _bw_last=2+len(am_exp)
+        for c,(cn,_,ct) in enumerate(am_bd):
+            if ct=="finance":
+                cl=chr(65+c)
+                ambw.write_formula(_bw_last,c,f"=SUM({cl}{_bw_s}:{cl}{_bw_last})",am_tot_num)
+            else: ambw.write(_bw_last,c,"" if c>0 else "TOTAL",am_tot_lbl)
+
+        # ── SHEET 6: FULL AWARDED ────────────────────────────────────────────
+        pw=_ws("Full Awarded","#1a3a6b")
+        pw.merge_range("A1:L1","Full AM Awarded Deals — All Opportunities",F["title"]); pw.set_row(0,28); pw.freeze_panes(2,0)
+        full_hdr=["#","Account Name","Opportunity","Capability Sales","BU","DU",
+                  "Gross (QAR)","Net (QAR)","Project Value (QAR)","New/Renew","Quarter","Contracted"]
+        full_w  =[5,28,44,28,30,36,18,18,20,12,10,12]
+        _hdr(pw,1,full_hdr,full_w,F["header"]); pw.autofilter(1,0,1+len(full_df),len(full_hdr)-1)
+        for r,row in full_df.reset_index(drop=True).iterrows():
+            alt=r%2==1; tf=F["alt"] if alt else F["text"]; nf=F["alt_num"] if alt else F["num"]
+            pw.write(2+r,0,row.get("SNo.",r+1),tf)
+            pw.write(2+r,1,str(row["Account Name"])    if pd.notna(row["Account Name"])    else "",tf)
+            pw.write(2+r,2,str(row["Opportunity Name"])if pd.notna(row["Opportunity Name"])else "",tf)
+            pw.write(2+r,3,str(row["Capability Sales"])if pd.notna(row["Capability Sales"])else "",tf)
+            pw.write(2+r,4,str(row["BU"])              if pd.notna(row["BU"])              else "",tf)
+            pw.write(2+r,5,str(row["DU"])              if pd.notna(row["DU"])              else "",tf)
+            pw.write_number(2+r,6,row["Total Gross"],nf); pw.write_number(2+r,7,row["Total Net"],nf)
+            pw.write_number(2+r,8,row["Project Value"],nf)
+            pw.write(2+r,9, str(row["New/Renew"])    if pd.notna(row["New/Renew"])    else "",tf)
+            pw.write(2+r,10,str(row["Award Quarter"])if pd.notna(row["Award Quarter"])else "",tf)
+            pw.write(2+r,11,str(row["Contracted"])   if pd.notna(row["Contracted"])   else "",tf)
+        _fpl=2+len(full_df); pw.write(_fpl,0,"TOTAL",F["tot_lbl"])
+        for c in range(1,6): pw.write(_fpl,c,"",F["tot_lbl"])
+        pw.write_formula(_fpl,6,f"=SUM(G3:G{_fpl})",F["tot_num"])
+        pw.write_formula(_fpl,7,f"=SUM(H3:H{_fpl})",F["tot_num"])
+        pw.write_formula(_fpl,8,f"=SUM(I3:I{_fpl})",F["tot_num"])
+        for c in range(9,12): pw.write(_fpl,c,"",F["tot_lbl"])
+
+    output.seek(0)
+    return output.read()
+
+
 # ── SIDEBAR ────────────────────────────────────────────────────────────────────
 st.sidebar.title("📁 Load Data")
 uploaded      = st.sidebar.file_uploader("Pipeline Excel (weekly report)", type=["xlsx","xls"])
@@ -1649,10 +1979,11 @@ uploaded_aw   = st.sidebar.file_uploader("Awarded Deals 2026",             type=
 uploaded_aw25 = st.sidebar.file_uploader("Awarded Deals 2025",             type=["xlsx","xls"])
 uploaded_b3   = st.sidebar.file_uploader("Book3 (Resource Forecast)",      type=["xlsx","xls"])
 uploaded_am   = st.sidebar.file_uploader("AM Pipeline (Capability Sales)", type=["xlsx","xls"])
+uploaded_am_aw = st.sidebar.file_uploader("AM Awarded (Capability Sales)", type=["xlsx","xls"])
 
 have_awarded = uploaded_aw or uploaded_aw25
 
-if not uploaded and not have_awarded and not uploaded_am:
+if not uploaded and not have_awarded and not uploaded_am and not uploaded_am_aw:
     st.info("👆 Upload at least one Excel file to get started.")
     st.stop()
 
@@ -1677,15 +2008,19 @@ if have_awarded:
 if uploaded_am:
     st.sidebar.success("AM Pipeline file loaded ✓")
 
+if uploaded_am_aw:
+    st.sidebar.success("AM Awarded file loaded ✓")
+
 # ── TABS ──────────────────────────────────────────────────────────────────────
 st.title("📊 Sales Weekly Review Dashboard")
 st.caption(f"Report date: {date.today().strftime('%d %B %Y')}")
 
 tab_labels = []
-if uploaded:     tab_labels.append("🔵 Pipeline")
-if have_awarded: tab_labels.append("🟢 Awarded Deals")
-if uploaded_am:  tab_labels.append("🟠 AM Pipeline")
-if uploaded_b3:  tab_labels.append("🔗 Book3 Mapping")
+if uploaded:        tab_labels.append("🔵 Pipeline")
+if have_awarded:    tab_labels.append("🟢 Awarded Deals")
+if uploaded_am:     tab_labels.append("🟠 AM Pipeline")
+if uploaded_am_aw:  tab_labels.append("🔴 AM Awarded")
+if uploaded_b3:     tab_labels.append("🔗 Book3 Mapping")
 tabs = st.tabs(tab_labels)
 tab_idx = {name: i for i, name in enumerate(tab_labels)}
 
@@ -2251,6 +2586,98 @@ if uploaded_am and "🟠 AM Pipeline" in tab_idx:
     st.subheader("Full AM Pipeline")
     st.dataframe(df_am[["SNo.","Account Name","Lead/Opp Name","Stage_Short","Capability Sales","Sector","Total Gross","Total Net","Winning Probability","Forecasted","Closure Due Quarter"]].rename(columns={"Stage_Short":"Stage"}),
                  use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AM AWARDED TAB
+# ══════════════════════════════════════════════════════════════════════════════
+if uploaded_am_aw and "🔴 AM Awarded" in tab_idx:
+  with tabs[tab_idx["🔴 AM Awarded"]]:
+    df_am_aw = load_am_awarded(uploaded_am_aw)
+    cap_col_aw2, btn_col_aw2 = st.columns([6, 2])
+    cap_col_aw2.caption(f"{len(df_am_aw)} deals — AM Awarded Deals (Capability Sales view)")
+    with btn_col_aw2:
+        am_aw_xl = export_am_awarded_excel(uploaded_am_aw)
+        st.download_button(
+            label="⬇️ Export AM Awarded Report",
+            data=am_aw_xl,
+            file_name=f"AM_Awarded_Report_{date.today()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    # KPIs
+    k1,k2,k3,k4,k5,k6 = st.columns(6)
+    k1.metric("Total Deals",        len(df_am_aw))
+    k2.metric("Total Gross",        f"{df_am_aw['Total Gross'].sum()/1e6:.1f}M")
+    k3.metric("Total Net",          f"{df_am_aw['Total Net'].sum()/1e6:.1f}M")
+    k4.metric("Project Value",      f"{df_am_aw['Project Value'].sum()/1e6:.1f}M")
+    k5.metric("Contracted",         int((df_am_aw["Contracted"]=="Yes").sum()))
+    k6.metric("New Deals",          int((df_am_aw["New/Renew"]=="New").sum()))
+    st.markdown("---")
+
+    # Explode by AM for charts
+    _aw2_exp = []
+    for _, row in df_am_aw.iterrows():
+        ams = _clean_am_list(row.get("Capability Sales",""))
+        if not ams: ams = ["Unassigned"]
+        for am in ams:
+            _aw2_exp.append({"Account Manager": am, "Total Gross": row["Total Gross"],
+                             "Total Net": row["Total Net"], "Project Value": row["Project Value"],
+                             "Opportunity Name": row.get("Opportunity Name","")})
+    aw2_exp_df = pd.DataFrame(_aw2_exp)
+    aw2_am_agg = (aw2_exp_df.groupby("Account Manager")
+                  .agg(Deals=("Opportunity Name","nunique"), Gross=("Total Gross","sum"), Net=("Total Net","sum"))
+                  .reset_index().sort_values("Net", ascending=False))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Net Awarded by Account Manager")
+        fig_aw2_am = px.bar(aw2_am_agg, x="Account Manager", y="Net",
+                            text=aw2_am_agg["Net"].apply(lambda v: f"{v/1e6:.1f}M"),
+                            color="Net", color_continuous_scale="Oranges")
+        fig_aw2_am.update_traces(textposition="outside")
+        fig_aw2_am.update_layout(height=350, showlegend=False, coloraxis_showscale=False,
+                                  margin=dict(l=10,r=10,t=10,b=80), xaxis_tickangle=-30)
+        st.plotly_chart(fig_aw2_am, use_container_width=True)
+    with col2:
+        st.subheader("AM Summary")
+        st.dataframe(
+            aw2_am_agg.assign(**{"Gross (M)": aw2_am_agg["Gross"]/1e6, "Net (M)": aw2_am_agg["Net"]/1e6})
+            [["Account Manager","Deals","Gross (M)","Net (M)"]]
+            .style.format({"Gross (M)":"{:.1f}","Net (M)":"{:.1f}"}),
+            use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    col3, col4 = st.columns(2)
+    with col3:
+        st.subheader("Net by Award Quarter")
+        q_agg = (df_am_aw.groupby("Award Quarter")
+                 .agg(Net=("Total Net","sum")).reset_index().sort_values("Award Quarter"))
+        fig_q = px.bar(q_agg, x="Award Quarter", y="Net",
+                       text=q_agg["Net"].apply(lambda v: f"{v/1e6:.1f}M"),
+                       color="Net", color_continuous_scale="Blues")
+        fig_q.update_traces(textposition="outside")
+        fig_q.update_layout(height=320, showlegend=False, coloraxis_showscale=False,
+                             margin=dict(l=10,r=10,t=10,b=40))
+        st.plotly_chart(fig_q, use_container_width=True)
+    with col4:
+        st.subheader("New vs Renew")
+        nr_agg = (df_am_aw.groupby("New/Renew")
+                  .agg(Count=("Opportunity Name","count"), Net=("Total Net","sum")).reset_index())
+        fig_nr = px.pie(nr_agg, names="New/Renew", values="Net",
+                        color_discrete_map={"New":"#2E7D32","Renew":"#1a3a6b"})
+        fig_nr.update_traces(textinfo="label+percent", textposition="outside")
+        fig_nr.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10), showlegend=True)
+        st.plotly_chart(fig_nr, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Full AM Awarded Deals")
+    st.dataframe(
+        df_am_aw[["SNo.","Account Name","Opportunity Name","Capability Sales",
+                  "BU","DU","Total Gross","Total Net","Project Value",
+                  "New/Renew","Award Quarter","Contracted"]]
+        .style.format({"Total Gross":"{:,.0f}","Total Net":"{:,.0f}","Project Value":"{:,.0f}"}),
+        use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BOOK3 MAPPING TAB

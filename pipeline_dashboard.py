@@ -413,15 +413,6 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
     stage_order = list(STAGE_SHORT_MAP.values())
 
     # ── Build tables ──────────────────────────────────────────────────────────
-    kpi_df = pd.DataFrame([
-        {"Metric":"Total Opportunities",         "Value": len(df)},
-        {"Metric":"Total Gross Pipeline (QAR)",  "Value": df["Total Gross"].sum()},
-        {"Metric":"Total Net Pipeline (QAR)",    "Value": df["Total Net"].sum()},
-        {"Metric":"Forecasted Gross (QAR)",      "Value": df[df["Forecasted"]=="Yes"]["Total Gross"].sum()},
-        {"Metric":"Forecasted Net (QAR)",        "Value": df[df["Forecasted"]=="Yes"]["Total Net"].sum()},
-        {"Metric":"Strategic Opportunities",     "Value": len(df[df["Strategic Opportunity"]=="Yes"])},
-        {"Metric":"Overdue Deals",               "Value": int(df["Overdue"].sum())},
-    ])
     stage_df = (df.groupby("Stage_Short").agg(Count=("Lead/Opp Name","count"),Gross=("Total Gross","sum"),Net=("Total Net","sum")).reset_index().rename(columns={"Stage_Short":"Stage"}))
     stage_df["_ord"] = stage_df["Stage"].map({s:i for i,s in enumerate(stage_order)})
     stage_df = stage_df.sort_values("_ord").drop(columns="_ord")
@@ -446,6 +437,7 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
     du_stage = du_stage.merge(fore_du_stage, on=["DU","Stage"], how="left").fillna({"Forecasted Net":0})
 
     # ── Write to buffer ───────────────────────────────────────────────────────
+    fp_last_row = 2 + len(full_df)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         wb = writer.book
@@ -456,35 +448,83 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
         writer.sheets["Summary"] = ws
         ws.merge_range("A1:C1", f"Weekly Pipeline Summary — {TODAY.strftime('%d %B %Y')}", F["title"]); ws.set_row(0,28)
         _hdr(ws, 2, ["Metric","Value"], [34,22], F["header"])
-        for i, row in kpi_df.iterrows():
-            ws.write(3+i, 0, row["Metric"], F["kpi_lbl"]); ws.write_number(3+i, 1, row["Value"], F["kpi_val"])
+        _fp = "'Full Pipeline'"; _n = fp_last_row
+        kpi_formulas = [
+            ("Total Opportunities",         f"=COUNTA({_fp}!C3:C{_n})",                                        F["kpi_val"]),
+            ("Total Gross Pipeline (QAR)",  f"=SUM({_fp}!I3:I{_n})",                                           F["kpi_val"]),
+            ("Total Net Pipeline (QAR)",    f"=SUM({_fp}!J3:J{_n})",                                           F["kpi_val"]),
+            ("Forecasted Gross (QAR)",      f'=SUMIF({_fp}!L3:L{_n},"Yes",{_fp}!I3:I{_n})',                   F["kpi_val"]),
+            ("Forecasted Net (QAR)",        f'=SUMIF({_fp}!L3:L{_n},"Yes",{_fp}!J3:J{_n})',                   F["kpi_val"]),
+            ("Strategic Opportunities",     f'=COUNTIF({_fp}!M3:M{_n},"Yes")',                                  F["kpi_val"]),
+            ("Overdue Deals",               f'=COUNTIF({_fp}!Q3:Q{_n},"YES")',                                  F["kpi_val"]),
+        ]
+        for i, (label, formula, fmt) in enumerate(kpi_formulas):
+            ws.write(3+i, 0, label, F["kpi_lbl"]); ws.write_formula(3+i, 1, formula, fmt)
         ws.merge_range("D1:H1", "Pipeline by Stage", F["title"])
         _hdr(ws, 2, ["Stage","Count","Gross (QAR)","Net (QAR)"], None, F["header"])
         ws.set_column(3,3,22); ws.set_column(4,4,8); ws.set_column(5,5,18); ws.set_column(6,6,18)
         for i, row in stage_df.reset_index(drop=True).iterrows():
+            xl1 = 4 + i
             alt = i%2==1
-            ws.write(3+i,3,row["Stage"],F["alt"] if alt else F["text"]); ws.write_number(3+i,4,row["Count"],F["alt_num"] if alt else F["num"]); ws.write_number(3+i,5,row["Gross"],F["alt_num"] if alt else F["num"]); ws.write_number(3+i,6,row["Net"],F["alt_num"] if alt else F["num"])
+            ws.write(3+i,3,row["Stage"],F["alt"] if alt else F["text"])
+            ws.write_formula(3+i,4,f'=COUNTIF({_fp}!D3:D{_n},D{xl1})',F["alt_num"] if alt else F["num"])
+            ws.write_formula(3+i,5,f'=SUMIF({_fp}!D3:D{_n},D{xl1},{_fp}!I3:I{_n})',F["alt_num"] if alt else F["num"])
+            ws.write_formula(3+i,6,f'=SUMIF({_fp}!D3:D{_n},D{xl1},{_fp}!J3:J{_n})',F["alt_num"] if alt else F["num"])
+        _sl = 3 + len(stage_df)
+        ws.write(3+len(stage_df),3,"TOTAL",F["tot_lbl"])
+        ws.write_formula(3+len(stage_df),4,f"=SUM(E4:E{_sl})",F["tot_num"])
+        ws.write_formula(3+len(stage_df),5,f"=SUM(F4:F{_sl})",F["tot_num"])
+        ws.write_formula(3+len(stage_df),6,f"=SUM(G4:G{_sl})",F["tot_num"])
 
         # SHEET 2 — DU BREAKDOWN
         du_ws = wb.add_worksheet("DU Breakdown"); du_ws.set_zoom(90); du_ws.set_tab_color("#FF8C00")
         writer.sheets["DU Breakdown"] = du_ws
         du_ws.merge_range("A1:G1","Gross & Net Breakdown by BU / Delivery Unit",F["title"]); du_ws.set_row(0,28)
         _hdr(du_ws,1,["BU","Delivery Unit / Opportunity","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"],[42,52,20,20,22],F["header"])
-        r_out=0
+        # Two-pass: pre-compute layout then write with SUM formulas
+        _du_layout = []
+        _pos = 0
         for bu_name, bu_grp in du_totals.groupby("BU"):
-            du_ws.write(2+r_out,0,bu_name,F["bu_lbl"]); du_ws.write(2+r_out,1,"",F["bu_lbl"])
-            du_ws.write_number(2+r_out,2,bu_grp["Gross"].sum(),F["bu_num"]); du_ws.write_number(2+r_out,3,bu_grp["Net"].sum(),F["bu_num"]); du_ws.write_number(2+r_out,4,bu_grp["Forecasted Net"].sum(),F["bu_num"]); r_out+=1
-            for _, row in bu_grp.iterrows():
-                alt=r_out%2==1
-                du_ws.write(2+r_out,0,"",F["alt"] if alt else F["text"]); du_ws.write(2+r_out,1,row["DU"],F["alt"] if alt else F["text"])
-                du_ws.write_number(2+r_out,2,row["Gross"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,3,row["Net"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,4,row["Forecasted Net"],F["alt_num"] if alt else F["num"]); r_out+=1
-                for _, deal in du_exp[du_exp["DU"]==row["DU"]].iterrows():
+            bu_r0 = 2 + _pos; _pos += 1
+            du_list = []
+            for _, drow in bu_grp.iterrows():
+                du_r0 = 2 + _pos; _pos += 1
+                deals = du_exp[du_exp["DU"] == drow["DU"]]
+                opp_rows = []
+                for _, deal in deals.iterrows():
+                    opp_rows.append(2 + _pos); _pos += 1
+                du_list.append((drow, du_r0, opp_rows))
+            _du_layout.append((bu_name, bu_r0, du_list))
+        _gt_r0 = 2 + _pos
+        for bu_name, bu_r0, du_list in _du_layout:
+            du_ws.write(bu_r0,0,bu_name,F["bu_lbl"]); du_ws.write(bu_r0,1,"",F["bu_lbl"])
+            _du_rows = [dr0+1 for (_, dr0, _) in du_list]
+            _buC = "+".join("C"+str(r) for r in _du_rows)
+            _buD = "+".join("D"+str(r) for r in _du_rows)
+            _buE = "+".join("E"+str(r) for r in _du_rows)
+            du_ws.write_formula(bu_r0,2,"="+_buC,F["bu_num"]); du_ws.write_formula(bu_r0,3,"="+_buD,F["bu_num"]); du_ws.write_formula(bu_r0,4,"="+_buE,F["bu_num"])
+            for drow, du_r0, opp_rows in du_list:
+                alt=(du_r0-2)%2==1
+                du_ws.write(du_r0,0,"",F["alt"] if alt else F["text"]); du_ws.write(du_r0,1,drow["DU"],F["alt"] if alt else F["text"])
+                if opp_rows:
+                    _r1=min(opp_rows)+1; _rN=max(opp_rows)+1
+                    du_ws.write_formula(du_r0,2,f"=SUM(C{_r1}:C{_rN})",F["alt_num"] if alt else F["num"])
+                    du_ws.write_formula(du_r0,3,f"=SUM(D{_r1}:D{_rN})",F["alt_num"] if alt else F["num"])
+                    du_ws.write_formula(du_r0,4,f"=SUM(E{_r1}:E{_rN})",F["alt_num"] if alt else F["num"])
+                else:
+                    du_ws.write_number(du_r0,2,0,F["alt_num"] if alt else F["num"]); du_ws.write_number(du_r0,3,0,F["alt_num"] if alt else F["num"]); du_ws.write_number(du_r0,4,0,F["alt_num"] if alt else F["num"])
+                for opp_r0 in opp_rows:
+                    deal = du_exp[du_exp["DU"]==drow["DU"]].iloc[opp_rows.index(opp_r0)]
                     fore_net=deal["Net"] if str(deal.get("Forecasted","")).strip()=="Yes" else 0
-                    du_ws.write(2+r_out,0,"",F["opp"]); du_ws.write(2+r_out,1,f"  ↳  {deal['Lead/Opp Name']}",F["opp"])
-                    du_ws.write_number(2+r_out,2,deal["Gross"],F["opp_num"]); du_ws.write_number(2+r_out,3,deal["Net"],F["opp_num"]); du_ws.write_number(2+r_out,4,fore_net,F["opp_num"]); r_out+=1
-        t=2+r_out
+                    du_ws.write(opp_r0,0,"",F["opp"]); du_ws.write(opp_r0,1,f"  ↳  {deal['Lead/Opp Name']}",F["opp"])
+                    du_ws.write_number(opp_r0,2,deal["Gross"],F["opp_num"]); du_ws.write_number(opp_r0,3,deal["Net"],F["opp_num"]); du_ws.write_number(opp_r0,4,fore_net,F["opp_num"])
+        t=_gt_r0
         du_ws.write(t,0,"GRAND TOTAL",F["tot_lbl"]); du_ws.write(t,1,"",F["tot_lbl"])
-        du_ws.write_number(t,2,du_totals["Gross"].sum(),F["tot_num"]); du_ws.write_number(t,3,du_totals["Net"].sum(),F["tot_num"]); du_ws.write_number(t,4,du_totals["Forecasted Net"].sum(),F["tot_num"])
+        _bu_rows = [br0+1 for (_, br0, _) in _du_layout]
+        _gtC = "+".join("C"+str(r) for r in _bu_rows)
+        _gtD = "+".join("D"+str(r) for r in _bu_rows)
+        _gtE = "+".join("E"+str(r) for r in _bu_rows)
+        du_ws.write_formula(t,2,"="+_gtC,F["tot_num"]); du_ws.write_formula(t,3,"="+_gtD,F["tot_num"]); du_ws.write_formula(t,4,"="+_gtE,F["tot_num"])
         du_ws.merge_range(t+2,0,t+2,5,"BU / DU x Stage Detail",F["title"])
         _hdr(du_ws,t+3,["BU","Delivery Unit","Stage","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"],None,F["header"])
         for i, row in du_stage.reset_index(drop=True).iterrows():
@@ -498,36 +538,64 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
         fd_ws.merge_range("A1:J1",f"Forecasted Pipeline by BU / Delivery Unit — {TODAY.strftime('%d %B %Y')}",F["title"]); fd_ws.set_row(0,28)
         fd_ws.merge_range("A2:J2","Summary: Forecasted Net by BU / DU / Quarter",F["sec_hdr"]); fd_ws.set_row(2,22)
         _hdr(fd_ws,3,["BU","Delivery Unit","Quarter","Count","Gross (QAR)","Net (QAR)"],[42,38,10,8,20,20],F["header"])
-        current_bu=None; r_s=0
-        for _, row in fore_du_summary.iterrows():
-            if row["BU"]!=current_bu:
-                current_bu=row["BU"]; bu_sub=fore_du_summary[fore_du_summary["BU"]==current_bu]
-                fd_ws.write(4+r_s,0,current_bu,F["bu_lbl"]); fd_ws.write(4+r_s,1,f"Total: {len(bu_sub)} rows",F["bu_lbl"]); fd_ws.write(4+r_s,2,"",F["bu_lbl"])
-                fd_ws.write_number(4+r_s,3,bu_sub["Count"].sum(),F["bu_num"]); fd_ws.write_number(4+r_s,4,bu_sub["Gross"].sum(),F["bu_num"]); fd_ws.write_number(4+r_s,5,bu_sub["Net"].sum(),F["bu_num"]); r_s+=1
-            alt=r_s%2==1
-            fd_ws.write(4+r_s,0,"",F["alt"] if alt else F["text"]); fd_ws.write(4+r_s,1,row["DU"],F["alt"] if alt else F["text"]); fd_ws.write(4+r_s,2,row["Closure Due Quarter"],F["alt"] if alt else F["text"])
-            fd_ws.write_number(4+r_s,3,row["Count"],F["alt_num"] if alt else F["num"]); fd_ws.write_number(4+r_s,4,row["Gross"],F["alt_num"] if alt else F["num"]); fd_ws.write_number(4+r_s,5,row["Net"],F["alt_num"] if alt else F["num"]); r_s+=1
-        ts=4+r_s
+        # Two-pass: pre-compute layout for BU subtotal formulas
+        _fds_layout = []
+        _fds_pos = 0
+        for bu_name, bu_grp in fore_du_summary.groupby("BU", sort=False):
+            bu_r0 = 4 + _fds_pos; _fds_pos += 1
+            detail_rows = []
+            for _, drow in bu_grp.iterrows():
+                detail_rows.append(4 + _fds_pos); _fds_pos += 1
+            _fds_layout.append((bu_name, bu_grp, bu_r0, detail_rows))
+        ts = 4 + _fds_pos
+        for bu_name, bu_grp, bu_r0, detail_rows in _fds_layout:
+            fd_ws.write(bu_r0,0,bu_name,F["bu_lbl"]); fd_ws.write(bu_r0,1,f"Total: {len(bu_grp)} rows",F["bu_lbl"]); fd_ws.write(bu_r0,2,"",F["bu_lbl"])
+            if detail_rows:
+                _r1=min(detail_rows)+1; _rN=max(detail_rows)+1
+                fd_ws.write_formula(bu_r0,3,f"=SUM(D{_r1}:D{_rN})",F["bu_num"])
+                fd_ws.write_formula(bu_r0,4,f"=SUM(E{_r1}:E{_rN})",F["bu_num"])
+                fd_ws.write_formula(bu_r0,5,f"=SUM(F{_r1}:F{_rN})",F["bu_num"])
+            for dr0, (_, row) in zip(detail_rows, bu_grp.iterrows()):
+                alt=(dr0-4)%2==1
+                fd_ws.write(dr0,0,"",F["alt"] if alt else F["text"]); fd_ws.write(dr0,1,row["DU"],F["alt"] if alt else F["text"]); fd_ws.write(dr0,2,row["Closure Due Quarter"],F["alt"] if alt else F["text"])
+                fd_ws.write_number(dr0,3,row["Count"],F["alt_num"] if alt else F["num"]); fd_ws.write_number(dr0,4,row["Gross"],F["alt_num"] if alt else F["num"]); fd_ws.write_number(dr0,5,row["Net"],F["alt_num"] if alt else F["num"])
         fd_ws.write(ts,0,"GRAND TOTAL",F["tot_lbl"])
         for _c in range(1,3): fd_ws.write(ts,_c,"",F["tot_lbl"])
-        fd_ws.write_number(ts,3,fore_du_summary["Count"].sum(),F["tot_num"]); fd_ws.write_number(ts,4,fore_du_summary["Gross"].sum(),F["tot_num"]); fd_ws.write_number(ts,5,fore_du_summary["Net"].sum(),F["tot_num"])
+        _bu_r_nums = [br0+1 for (_, _, br0, _) in _fds_layout]
+        _gtD = "+".join("D"+str(r) for r in _bu_r_nums)
+        _gtE = "+".join("E"+str(r) for r in _bu_r_nums)
+        _gtF = "+".join("F"+str(r) for r in _bu_r_nums)
+        fd_ws.write_formula(ts,3,"="+_gtD,F["tot_num"]); fd_ws.write_formula(ts,4,"="+_gtE,F["tot_num"]); fd_ws.write_formula(ts,5,"="+_gtF,F["tot_num"])
         det_start=ts+2
         fd_ws.merge_range(det_start,0,det_start,9,"Detail: Forecasted Deals by BU / DU",F["sec_hdr"]); fd_ws.set_row(det_start,22)
         _hdr(fd_ws,det_start+1,["BU","Delivery Unit","Account Name","Opportunity","Stage","Account Manager","Quarter","Gross (QAR)","Net (QAR)","Win Prob"],[42,38,28,36,22,24,10,18,18,12],F["header"])
-        current_bu=None; r_d=0
-        for _, row in fore_du_detail.iterrows():
-            if row["BU"]!=current_bu:
-                current_bu=row["BU"]; bu_grp=fore_du_detail[fore_du_detail["BU"]==current_bu]
-                fd_ws.write(det_start+2+r_d,0,current_bu,F["bu_lbl"])
-                for _cc in range(1,10): fd_ws.write(det_start+2+r_d,_cc,"",F["bu_lbl"])
-                fd_ws.write_number(det_start+2+r_d,7,bu_grp["Gross"].sum(),F["bu_num"]); fd_ws.write_number(det_start+2+r_d,8,bu_grp["Net"].sum(),F["bu_num"]); r_d+=1
-            alt=r_d%2==1; f_t=F["grn"] if not alt else F["alt"]; f_n=F["grn_num"] if not alt else F["alt_num"]
-            fd_ws.write(det_start+2+r_d,0,"",f_t); fd_ws.write(det_start+2+r_d,1,str(row["DU"]) if pd.notna(row["DU"]) else "",f_t); fd_ws.write(det_start+2+r_d,2,str(row["Account Name"]) if pd.notna(row["Account Name"]) else "",f_t); fd_ws.write(det_start+2+r_d,3,str(row["Lead/Opp Name"]) if pd.notna(row["Lead/Opp Name"]) else "",f_t); fd_ws.write(det_start+2+r_d,4,str(row["Stage"]) if pd.notna(row["Stage"]) else "",f_t); fd_ws.write(det_start+2+r_d,5,str(row["Account Manager"]) if pd.notna(row["Account Manager"]) else "",f_t); fd_ws.write(det_start+2+r_d,6,str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "",f_t)
-            fd_ws.write_number(det_start+2+r_d,7,row["Gross"],f_n); fd_ws.write_number(det_start+2+r_d,8,row["Net"],f_n); fd_ws.write(det_start+2+r_d,9,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",f_t); r_d+=1
-        td=det_start+2+r_d
+        # Two-pass for detail section
+        _fdd_layout = []
+        _fdd_pos = 0
+        for bu_name, bu_grp in fore_du_detail.groupby("BU", sort=False):
+            bu_r0 = det_start + 2 + _fdd_pos; _fdd_pos += 1
+            detail_rows = []
+            for _, drow in bu_grp.iterrows():
+                detail_rows.append(det_start + 2 + _fdd_pos); _fdd_pos += 1
+            _fdd_layout.append((bu_name, bu_grp, bu_r0, detail_rows))
+        td = det_start + 2 + _fdd_pos
+        for bu_name, bu_grp, bu_r0, detail_rows in _fdd_layout:
+            fd_ws.write(bu_r0,0,bu_name,F["bu_lbl"])
+            for _cc in range(1,10): fd_ws.write(bu_r0,_cc,"",F["bu_lbl"])
+            if detail_rows:
+                _r1=min(detail_rows)+1; _rN=max(detail_rows)+1
+                fd_ws.write_formula(bu_r0,7,f"=SUM(H{_r1}:H{_rN})",F["bu_num"])
+                fd_ws.write_formula(bu_r0,8,f"=SUM(I{_r1}:I{_rN})",F["bu_num"])
+            for dr0, (_, row) in zip(detail_rows, bu_grp.iterrows()):
+                alt=(dr0-det_start-2)%2==1; f_t=F["grn"] if not alt else F["alt"]; f_n=F["grn_num"] if not alt else F["alt_num"]
+                fd_ws.write(dr0,0,"",f_t); fd_ws.write(dr0,1,str(row["DU"]) if pd.notna(row["DU"]) else "",f_t); fd_ws.write(dr0,2,str(row["Account Name"]) if pd.notna(row["Account Name"]) else "",f_t); fd_ws.write(dr0,3,str(row["Lead/Opp Name"]) if pd.notna(row["Lead/Opp Name"]) else "",f_t); fd_ws.write(dr0,4,str(row["Stage"]) if pd.notna(row["Stage"]) else "",f_t); fd_ws.write(dr0,5,str(row["Account Manager"]) if pd.notna(row["Account Manager"]) else "",f_t); fd_ws.write(dr0,6,str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "",f_t)
+                fd_ws.write_number(dr0,7,row["Gross"],f_n); fd_ws.write_number(dr0,8,row["Net"],f_n); fd_ws.write(dr0,9,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",f_t)
         fd_ws.write(td,0,"GRAND TOTAL",F["tot_lbl"])
         for _c in range(1,7): fd_ws.write(td,_c,"",F["tot_lbl"])
-        fd_ws.write_number(td,7,fore_du_detail["Gross"].sum(),F["tot_num"]); fd_ws.write_number(td,8,fore_du_detail["Net"].sum(),F["tot_num"]); fd_ws.write(td,9,"",F["tot_lbl"])
+        _bu_det_nums = [br0+1 for (_, _, br0, _) in _fdd_layout]
+        _gtH = "+".join("H"+str(r) for r in _bu_det_nums)
+        _gtI = "+".join("I"+str(r) for r in _bu_det_nums)
+        fd_ws.write_formula(td,7,"="+_gtH,F["tot_num"]); fd_ws.write_formula(td,8,"="+_gtI,F["tot_num"]); fd_ws.write(td,9,"",F["tot_lbl"])
 
         # SHEET 4 — SECTOR & AM
         sa_ws = wb.add_worksheet("Sector & AM"); sa_ws.set_zoom(90); sa_ws.set_tab_color("#228B22")
@@ -537,12 +605,24 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
         for i, row in sector_df.reset_index(drop=True).iterrows():
             alt=i%2==1
             sa_ws.write(2+i,0,row["Sector"],F["alt"] if alt else F["text"]); sa_ws.write_number(2+i,1,row["Count"],F["alt_num"] if alt else F["num"]); sa_ws.write_number(2+i,2,row["Gross"],F["alt_num"] if alt else F["num"]); sa_ws.write_number(2+i,3,row["Net"],F["alt_num"] if alt else F["num"])
-        off=2+len(sector_df)+2
+        _sec_t = 2 + len(sector_df)
+        sa_ws.write(_sec_t,0,"TOTAL",F["tot_lbl"])
+        sa_ws.write_formula(_sec_t,1,f"=SUM(B3:B{_sec_t})",F["tot_num"])
+        sa_ws.write_formula(_sec_t,2,f"=SUM(C3:C{_sec_t})",F["tot_num"])
+        sa_ws.write_formula(_sec_t,3,f"=SUM(D3:D{_sec_t})",F["tot_num"])
+        off=2+len(sector_df)+1+2
         sa_ws.merge_range(off,0,off,4,"Pipeline by Account Manager",F["title"])
         _hdr(sa_ws,off+1,["Account Manager","Count","Gross (QAR)","Net (QAR)","Forecasted Net (QAR)"],[28,8,20,20,22],F["header"])
         for i, row in am_df.reset_index(drop=True).iterrows():
             alt=i%2==1
             sa_ws.write(off+2+i,0,row["Account Manager"],F["alt"] if alt else F["text"]); sa_ws.write_number(off+2+i,1,row["Count"],F["alt_num"] if alt else F["num"]); sa_ws.write_number(off+2+i,2,row["Gross"],F["alt_num"] if alt else F["num"]); sa_ws.write_number(off+2+i,3,row["Net"],F["alt_num"] if alt else F["num"]); sa_ws.write_number(off+2+i,4,row["Forecasted Net"],F["alt_num"] if alt else F["num"])
+        _am_t = off + 2 + len(am_df)
+        _am_r1 = off + 3
+        sa_ws.write(_am_t,0,"TOTAL",F["tot_lbl"])
+        sa_ws.write_formula(_am_t,1,f"=SUM(B{_am_r1}:B{_am_t})",F["tot_num"])
+        sa_ws.write_formula(_am_t,2,f"=SUM(C{_am_r1}:C{_am_t})",F["tot_num"])
+        sa_ws.write_formula(_am_t,3,f"=SUM(D{_am_r1}:D{_am_t})",F["tot_num"])
+        sa_ws.write_formula(_am_t,4,f"=SUM(E{_am_r1}:E{_am_t})",F["tot_num"])
 
         # SHEET 5 — QUARTERLY & PROBABILITY
         qp_ws = wb.add_worksheet("Quarterly & Probability"); qp_ws.set_zoom(90); qp_ws.set_tab_color("#DAA520")
@@ -552,12 +632,24 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
         for i, row in q_df.reset_index(drop=True).iterrows():
             alt=i%2==1
             qp_ws.write(2+i,0,row["Closure Due Quarter"],F["alt"] if alt else F["text"]); qp_ws.write_number(2+i,1,row["Count"],F["alt_num"] if alt else F["num"]); qp_ws.write_number(2+i,2,row["Gross"],F["alt_num"] if alt else F["num"]); qp_ws.write_number(2+i,3,row["Net"],F["alt_num"] if alt else F["num"]); qp_ws.write_number(2+i,4,row["Forecasted Net"],F["alt_num"] if alt else F["num"])
-        off2=2+len(q_df)+2
+        _q_t = 2 + len(q_df)
+        qp_ws.write(_q_t,0,"TOTAL",F["tot_lbl"])
+        qp_ws.write_formula(_q_t,1,f"=SUM(B3:B{_q_t})",F["tot_num"])
+        qp_ws.write_formula(_q_t,2,f"=SUM(C3:C{_q_t})",F["tot_num"])
+        qp_ws.write_formula(_q_t,3,f"=SUM(D3:D{_q_t})",F["tot_num"])
+        qp_ws.write_formula(_q_t,4,f"=SUM(E3:E{_q_t})",F["tot_num"])
+        off2=2+len(q_df)+1+2
         qp_ws.merge_range(off2,0,off2,3,"Pipeline by Winning Probability",F["title"])
         _hdr(qp_ws,off2+1,["Winning Probability","Count","Gross (QAR)","Net (QAR)"],[22,8,20,20],F["header"])
         for i, row in prob_df.reset_index(drop=True).iterrows():
             alt=i%2==1
             qp_ws.write(off2+2+i,0,row["Winning Probability"],F["alt"] if alt else F["text"]); qp_ws.write_number(off2+2+i,1,row["Count"],F["alt_num"] if alt else F["num"]); qp_ws.write_number(off2+2+i,2,row["Gross"],F["alt_num"] if alt else F["num"]); qp_ws.write_number(off2+2+i,3,row["Net"],F["alt_num"] if alt else F["num"])
+        _pb_t = off2 + 2 + len(prob_df)
+        _pb_r1 = off2 + 3
+        qp_ws.write(_pb_t,0,"TOTAL",F["tot_lbl"])
+        qp_ws.write_formula(_pb_t,1,f"=SUM(B{_pb_r1}:B{_pb_t})",F["tot_num"])
+        qp_ws.write_formula(_pb_t,2,f"=SUM(C{_pb_r1}:C{_pb_t})",F["tot_num"])
+        qp_ws.write_formula(_pb_t,3,f"=SUM(D{_pb_r1}:D{_pb_t})",F["tot_num"])
 
         # SHEET 6 — FORECAST
         fw = wb.add_worksheet("Forecast"); fw.set_zoom(90); fw.set_tab_color("#228B22")
@@ -573,7 +665,8 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
             else:
                 fw.write_blank(2+i,9,None,F["grn_dt"])
         t2=2+len(fore_df)
-        fw.write(t2,0,"TOTAL",F["tot_lbl"]); fw.write_number(t2,5,fore_df["Total Gross"].sum(),F["tot_num"]); fw.write_number(t2,6,fore_df["Total Net"].sum(),F["tot_num"])
+        fw.write(t2,0,"TOTAL",F["tot_lbl"])
+        fw.write_formula(t2,5,f"=SUM(F3:F{t2})",F["tot_num"]); fw.write_formula(t2,6,f"=SUM(G3:G{t2})",F["tot_num"])
 
         # SHEET 7 — OVERDUE
         ow = wb.add_worksheet("Overdue Deals"); ow.set_zoom(90); ow.set_tab_color("#FF0000")
@@ -588,6 +681,9 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
             else:
                 ow.write_blank(2+i,5,None,F["red_dt"])
             ow.write(2+i,6,str(row["Winning Probability"]) if pd.notna(row["Winning Probability"]) else "",F["red"]); ow.write(2+i,7,str(row["Closure Due Quarter"]) if pd.notna(row["Closure Due Quarter"]) else "",F["red"])
+        _ov_t = 2 + len(overdue_df)
+        ow.write(_ov_t,0,"TOTAL",F["tot_lbl"])
+        ow.write_formula(_ov_t,4,f"=SUM(E3:E{_ov_t})",F["tot_num"])
 
         # SHEET 8 — FULL PIPELINE
         pw = wb.add_worksheet("Full Pipeline"); pw.set_zoom(85); pw.set_tab_color("#6495ED")
@@ -606,6 +702,9 @@ def export_pipeline_excel(file, book3_file=None, awarded_file=None):
             else:
                 pw.write_blank(2+i,14,None,fd_)
             pw.write(2+i,15,str(row["Source of Opportunity"]) if pd.notna(row["Source of Opportunity"]) else "",ft); pw.write(2+i,16,"YES" if is_ov else "",ft)
+        pw.write(fp_last_row,0,"TOTAL",F["tot_lbl"])
+        pw.write_formula(fp_last_row,8,f"=SUM(I3:I{fp_last_row})",F["tot_num"])
+        pw.write_formula(fp_last_row,9,f"=SUM(J3:J{fp_last_row})",F["tot_num"])
 
         # SHEET 9 — PIPELINE BREAKDOWN (styled, one row per DU per opportunity)
         _CLR = {
@@ -840,7 +939,8 @@ def export_awarded_excel(file26, file25):
             ft=F["y25"] if row["Year"]=="2025" else F["y26"]; fn=F["y25_num"] if row["Year"]=="2025" else F["y26_num"]
             ws.write(3+i,3,row["Year"],ft); ws.write_number(3+i,4,row["Count"],fn); ws.write_number(3+i,5,row["Gross"],fn); ws.write_number(3+i,6,row["Net"],fn); ws.write_number(3+i,7,row["PV"],fn)
         tr=3+len(year_df)
-        ws.write(tr,3,"TOTAL",F["tot_lbl"]); ws.write_number(tr,4,year_df["Count"].sum(),F["tot_num"]); ws.write_number(tr,5,year_df["Gross"].sum(),F["tot_num"]); ws.write_number(tr,6,year_df["Net"].sum(),F["tot_num"]); ws.write_number(tr,7,year_df["PV"].sum(),F["tot_num"])
+        ws.write(tr,3,"TOTAL",F["tot_lbl"])
+        ws.write_formula(tr,4,f"=SUM(E4:E{tr})",F["tot_num"]); ws.write_formula(tr,5,f"=SUM(F4:F{tr})",F["tot_num"]); ws.write_formula(tr,6,f"=SUM(G4:G{tr})",F["tot_num"]); ws.write_formula(tr,7,f"=SUM(H4:H{tr})",F["tot_num"])
         off_s=len(kpi_df)+5; ws.merge_range(off_s,0,off_s,3,"By Stage",F["title"])
         for c, col in enumerate(["Year","Stage","Deals","Net (QAR)"]): ws.write(off_s+1,c,col,F["header"])
         ws.set_column(0,0,8); ws.set_column(1,1,36)
@@ -854,21 +954,49 @@ def export_awarded_excel(file26, file25):
         du_ws.merge_range("A1:F1","Gross & Net Breakdown by BU / Delivery Unit",F["title"]); du_ws.set_row(0,28)
         for c,(col,w) in enumerate(zip(["BU","Delivery Unit / Opportunity","Gross (QAR)","Net (QAR)","Net 2025 (QAR)","Net 2026 (QAR)"],[42,52,20,20,20,20])):
             du_ws.write(1,c,col,F["header"]); du_ws.set_column(c,c,w)
-        r_out=0
+        # Two-pass awarded DU breakdown
+        _adu_layout = []
+        _apos = 0
         for bu_name, bu_grp in du_totals.groupby("BU"):
-            du_ws.write(2+r_out,0,bu_name,F["bu_lbl"]); du_ws.write(2+r_out,1,"",F["bu_lbl"])
-            du_ws.write_number(2+r_out,2,bu_grp["Gross"].sum(),F["bu_num"]); du_ws.write_number(2+r_out,3,bu_grp["Net"].sum(),F["bu_num"]); du_ws.write_number(2+r_out,4,bu_grp["2025"].sum(),F["bu_num"]); du_ws.write_number(2+r_out,5,bu_grp["2026"].sum(),F["bu_num"]); r_out+=1
-            for _, row in bu_grp.iterrows():
-                alt=r_out%2==1
-                du_ws.write(2+r_out,0,"",F["alt"] if alt else F["text"]); du_ws.write(2+r_out,1,row["DU"],F["alt"] if alt else F["text"])
-                du_ws.write_number(2+r_out,2,row["Gross"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,3,row["Net"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,4,row["2025"],F["alt_num"] if alt else F["num"]); du_ws.write_number(2+r_out,5,row["2026"],F["alt_num"] if alt else F["num"]); r_out+=1
-                for _, deal in du_exp[du_exp["DU"]==row["DU"]].iterrows():
+            bu_r0 = 2 + _apos; _apos += 1
+            du_list = []
+            for _, drow in bu_grp.iterrows():
+                du_r0 = 2 + _apos; _apos += 1
+                deals = du_exp[du_exp["DU"] == drow["DU"]]
+                opp_rows = []
+                for _, deal in deals.iterrows():
+                    opp_rows.append(2 + _apos); _apos += 1
+                du_list.append((drow, du_r0, opp_rows))
+            _adu_layout.append((bu_name, bu_r0, du_list))
+        _agt_r0 = 2 + _apos
+        for bu_name, bu_r0, du_list in _adu_layout:
+            du_ws.write(bu_r0,0,bu_name,F["bu_lbl"]); du_ws.write(bu_r0,1,"",F["bu_lbl"])
+            _du_rows = [dr0+1 for (_, dr0, _) in du_list]
+            _buC = "+".join("C"+str(r) for r in _du_rows); _buD = "+".join("D"+str(r) for r in _du_rows)
+            _buE = "+".join("E"+str(r) for r in _du_rows); _buF = "+".join("F"+str(r) for r in _du_rows)
+            du_ws.write_formula(bu_r0,2,"="+_buC,F["bu_num"]); du_ws.write_formula(bu_r0,3,"="+_buD,F["bu_num"]); du_ws.write_formula(bu_r0,4,"="+_buE,F["bu_num"]); du_ws.write_formula(bu_r0,5,"="+_buF,F["bu_num"])
+            for drow, du_r0, opp_rows in du_list:
+                alt=(du_r0-2)%2==1
+                du_ws.write(du_r0,0,"",F["alt"] if alt else F["text"]); du_ws.write(du_r0,1,drow["DU"],F["alt"] if alt else F["text"])
+                if opp_rows:
+                    _r1=min(opp_rows)+1; _rN=max(opp_rows)+1
+                    du_ws.write_formula(du_r0,2,f"=SUM(C{_r1}:C{_rN})",F["alt_num"] if alt else F["num"])
+                    du_ws.write_formula(du_r0,3,f"=SUM(D{_r1}:D{_rN})",F["alt_num"] if alt else F["num"])
+                    du_ws.write_formula(du_r0,4,f"=SUM(E{_r1}:E{_rN})",F["alt_num"] if alt else F["num"])
+                    du_ws.write_formula(du_r0,5,f"=SUM(F{_r1}:F{_rN})",F["alt_num"] if alt else F["num"])
+                else:
+                    for _c in range(2,6): du_ws.write_number(du_r0,_c,0,F["alt_num"] if alt else F["num"])
+                for opp_r0 in opp_rows:
+                    deal = du_exp[du_exp["DU"]==drow["DU"]].iloc[opp_rows.index(opp_r0)]
                     n25=deal["Net"] if deal["Year"]=="2025" else 0; n26=deal["Net"] if deal["Year"]=="2026" else 0
-                    du_ws.write(2+r_out,0,"",F["opp"]); du_ws.write(2+r_out,1,f"  ↳  {deal['Opportunity']}",F["opp"])
-                    du_ws.write_number(2+r_out,2,deal["Gross"],F["opp_num"]); du_ws.write_number(2+r_out,3,deal["Net"],F["opp_num"]); du_ws.write_number(2+r_out,4,n25,F["opp_num"]); du_ws.write_number(2+r_out,5,n26,F["opp_num"]); r_out+=1
-        t=2+r_out
+                    du_ws.write(opp_r0,0,"",F["opp"]); du_ws.write(opp_r0,1,f"  ↳  {deal['Opportunity']}",F["opp"])
+                    du_ws.write_number(opp_r0,2,deal["Gross"],F["opp_num"]); du_ws.write_number(opp_r0,3,deal["Net"],F["opp_num"]); du_ws.write_number(opp_r0,4,n25,F["opp_num"]); du_ws.write_number(opp_r0,5,n26,F["opp_num"])
+        t=_agt_r0
         du_ws.write(t,0,"GRAND TOTAL",F["tot_lbl"]); du_ws.write(t,1,"",F["tot_lbl"])
-        du_ws.write_number(t,2,du_totals["Gross"].sum(),F["tot_num"]); du_ws.write_number(t,3,du_totals["Net"].sum(),F["tot_num"]); du_ws.write_number(t,4,du_totals["2025"].sum(),F["tot_num"]); du_ws.write_number(t,5,du_totals["2026"].sum(),F["tot_num"])
+        _abu_rows = [br0+1 for (_, br0, _) in _adu_layout]
+        _agtC = "+".join("C"+str(r) for r in _abu_rows); _agtD = "+".join("D"+str(r) for r in _abu_rows)
+        _agtE = "+".join("E"+str(r) for r in _abu_rows); _agtF = "+".join("F"+str(r) for r in _abu_rows)
+        du_ws.write_formula(t,2,"="+_agtC,F["tot_num"]); du_ws.write_formula(t,3,"="+_agtD,F["tot_num"]); du_ws.write_formula(t,4,"="+_agtE,F["tot_num"]); du_ws.write_formula(t,5,"="+_agtF,F["tot_num"])
 
         # SHEET 3 — ACCOUNT MANAGER
         am_ws = wb.add_worksheet("Account Manager"); am_ws.set_zoom(90); am_ws.set_tab_color("#228B22")
@@ -880,7 +1008,8 @@ def export_awarded_excel(file26, file25):
             alt=i%2==1
             am_ws.write(2+i,0,row["Account Manager"],F["alt"] if alt else F["text"]); am_ws.write_number(2+i,1,row["Count"],F["alt_num"] if alt else F["num"]); am_ws.write_number(2+i,2,row["Gross"],F["alt_num"] if alt else F["num"]); am_ws.write_number(2+i,3,row["Net"],F["alt_num"] if alt else F["num"]); am_ws.write_number(2+i,4,row["Net 2025"],F["alt_num"] if alt else F["num"]); am_ws.write_number(2+i,5,row["Net 2026"],F["alt_num"] if alt else F["num"])
         tr=2+len(am_df)
-        am_ws.write(tr,0,"GRAND TOTAL",F["tot_lbl"]); am_ws.write_number(tr,1,am_df["Count"].sum(),F["tot_num"]); am_ws.write_number(tr,2,am_df["Gross"].sum(),F["tot_num"]); am_ws.write_number(tr,3,am_df["Net"].sum(),F["tot_num"]); am_ws.write_number(tr,4,am_df["Net 2025"].sum(),F["tot_num"]); am_ws.write_number(tr,5,am_df["Net 2026"].sum(),F["tot_num"])
+        am_ws.write(tr,0,"GRAND TOTAL",F["tot_lbl"])
+        am_ws.write_formula(tr,1,f"=SUM(B3:B{tr})",F["tot_num"]); am_ws.write_formula(tr,2,f"=SUM(C3:C{tr})",F["tot_num"]); am_ws.write_formula(tr,3,f"=SUM(D3:D{tr})",F["tot_num"]); am_ws.write_formula(tr,4,f"=SUM(E3:E{tr})",F["tot_num"]); am_ws.write_formula(tr,5,f"=SUM(F3:F{tr})",F["tot_num"])
 
         # SHEET 4 — AWARD QUARTER + NEW/RENEW
         aq_ws = wb.add_worksheet("Award Quarter"); aq_ws.set_zoom(90); aq_ws.set_tab_color("#DAA520")
@@ -892,12 +1021,16 @@ def export_awarded_excel(file26, file25):
             ft=F["y25"] if row["Year"]=="2025" else F["y26"]; fn=F["y25_num"] if row["Year"]=="2025" else F["y26_num"]
             aq_ws.write(2+i,0,row["Year"],ft); aq_ws.write(2+i,1,row["Award Quarter"],ft); aq_ws.write_number(2+i,2,row["Count"],fn); aq_ws.write_number(2+i,3,row["Gross"],fn); aq_ws.write_number(2+i,4,row["Net"],fn)
         tr=2+len(q_df)
-        aq_ws.write(tr,0,"TOTAL",F["tot_lbl"]); aq_ws.write(tr,1,"",F["tot_lbl"]); aq_ws.write_number(tr,2,q_df["Count"].sum(),F["tot_num"]); aq_ws.write_number(tr,3,q_df["Gross"].sum(),F["tot_num"]); aq_ws.write_number(tr,4,q_df["Net"].sum(),F["tot_num"])
+        aq_ws.write(tr,0,"TOTAL",F["tot_lbl"]); aq_ws.write(tr,1,"",F["tot_lbl"])
+        aq_ws.write_formula(tr,2,f"=SUM(C3:C{tr})",F["tot_num"]); aq_ws.write_formula(tr,3,f"=SUM(D3:D{tr})",F["tot_num"]); aq_ws.write_formula(tr,4,f"=SUM(E3:E{tr})",F["tot_num"])
         nr_off=tr+2; aq_ws.merge_range(nr_off,0,nr_off,4,"New vs Renew Breakdown",F["title"])
         for c, col in enumerate(["Year","Type","Deals","Gross (QAR)","Net (QAR)"]): aq_ws.write(nr_off+1,c,col,F["header"])
         for i, row in nr_df.reset_index(drop=True).iterrows():
             ft=F["y25"] if row["Year"]=="2025" else F["y26"]; fn=F["y25_num"] if row["Year"]=="2025" else F["y26_num"]
             aq_ws.write(nr_off+2+i,0,row["Year"],ft); aq_ws.write(nr_off+2+i,1,row["Type"],ft); aq_ws.write_number(nr_off+2+i,2,row["Count"],fn); aq_ws.write_number(nr_off+2+i,3,row["Gross"],fn); aq_ws.write_number(nr_off+2+i,4,row["Net"],fn)
+        _nr_t = nr_off + 2 + len(nr_df); _nr_r1 = nr_off + 3
+        aq_ws.write(_nr_t,0,"TOTAL",F["tot_lbl"]); aq_ws.write(_nr_t,1,"",F["tot_lbl"])
+        aq_ws.write_formula(_nr_t,2,f"=SUM(C{_nr_r1}:C{_nr_t})",F["tot_num"]); aq_ws.write_formula(_nr_t,3,f"=SUM(D{_nr_r1}:D{_nr_t})",F["tot_num"]); aq_ws.write_formula(_nr_t,4,f"=SUM(E{_nr_r1}:E{_nr_t})",F["tot_num"])
 
         # SHEET 5 — ALL AWARDED DEALS
         fd_ws = wb.add_worksheet("All Awarded Deals"); fd_ws.set_zoom(85); fd_ws.set_tab_color("#6495ED")

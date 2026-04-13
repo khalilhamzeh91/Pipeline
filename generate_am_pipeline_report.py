@@ -70,14 +70,17 @@ def _parse_num(value):
         return None
 
 def _clean_am_list(value):
-    """Deduplicate AM names from newline-separated field."""
+    """Deduplicate and normalize AM names from newline-separated field."""
     if pd.isna(value) or str(value).strip() in ("", "nan"):
         return []
     seen = {}
     for name in str(value).split("\n"):
         name = name.strip()
-        if name:
-            seen[name] = None   # dict preserves insertion order, deduplicates
+        if not name:
+            continue
+        if "khalil" in name.lower():   name = "Khalil Hamzeh"
+        elif "yazan" in name.lower():  name = "Yazan Al Razem"
+        seen[name] = None
     return list(seen.keys())
 
 # ── EXPLODE BY AM (Capability Sales) ─────────────────────────────────────────

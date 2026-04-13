@@ -1174,6 +1174,11 @@ def load_am_pipeline(file):
     df["Stage_Short"] = df["Stage"].map(STAGE_SHORT_AM).fillna(df["Stage"])
     for m in MONTHS_AM:
         df[m] = pd.to_numeric(df.get(m, 0), errors="coerce").fillna(0)
+    # Normalize column names so _expand_deals can find them (AM file uses capital B)
+    if "Gross (Breakdown)" in df.columns:
+        df = df.rename(columns={"Gross (Breakdown)": "Gross (breakdown)"})
+    if "Net (Breakdown)" in df.columns:
+        df = df.rename(columns={"Net (Breakdown)": "Net (breakdown)"})
     return df
 
 @st.cache_data
@@ -1198,7 +1203,7 @@ def export_am_pipeline_excel(file):
     du_rows_am = []
     for _, row in df.iterrows():
         dus   = str(row.get("DU","")).split("\n")   if pd.notna(row.get("DU")) else ["Unknown"]
-        gross = str(row.get("Gross (Breakdown)","")).replace(",","").split("\n") if pd.notna(row.get("Gross (Breakdown)")) else ["0"]
+        gross = str(row.get("Gross (breakdown)","")).replace(",","").split("\n") if pd.notna(row.get("Gross (breakdown)")) else ["0"]
         net   = str(row.get("Net (breakdown)","")).replace(",","").split("\n")   if pd.notna(row.get("Net (breakdown)"))   else ["0"]
         n = max(len(dus), len(gross), len(net))
         for i in range(n):
@@ -1573,10 +1578,6 @@ def export_am_pipeline_excel(file):
 
         # Expand deals by DU using mapping
         pb_exp = _expand_deals(df, mapping=mapping)
-        # Fix column name differences in AM pipeline file
-        if "Gross (Breakdown)" in df.columns and "Gross (breakdown)" not in df.columns:
-            pb_exp["Gross_exp"] = pb_exp.apply(
-                lambda r: _parse_num(str(r.get("Gross (Breakdown)","")).split("\n")[int(r.get("_du_count",1))-1]) if r["_is_first"] else _parse_num(str(r.get("Gross (Breakdown)","")).split("\n")[0]), axis=1)
 
         pbw.autofilter(1,0,1+len(pb_exp),pb_nc-1)
         pb_cmap = {cn:idx for idx,(cn,_,__) in enumerate(pb_ocols)}
